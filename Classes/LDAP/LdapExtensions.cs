@@ -1,5 +1,6 @@
 ﻿using Novell.Directory.Ldap;
 using System;
+using System.Linq;
 
 namespace API.Classes.LDAP
 {
@@ -26,15 +27,13 @@ namespace API.Classes.LDAP
             {
                 return "";
             }
-
-            try
-            {
-                return entry.GetAttribute(attributeName)?.StringValue ?? "";
-            }
-            catch
-            {
-                return "";
-            }
+            
+            // =======================================================
+            // 【Novell v4.0.0 修正】
+            // 直接使用 LdapEntry 內建的 GetStringValueOrDefault 方法。
+            // 如果屬性不存在，它會回傳 null，我們透過 ?? "" 將 null 轉換為空字串。
+            // =======================================================
+            return entry.GetStringValueOrDefault(attributeName) ?? "";
         }
 
         /// <summary>

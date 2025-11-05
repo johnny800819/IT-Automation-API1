@@ -61,96 +61,92 @@ namespace API.Services.LDAP
 
             try
             {
-                return await Task.Run(() =>
+                // --- 1. 讀取設定 ---
+                var accountsToCheck = _config.GetSection("AdControllerConfig:UserPwdLastSetCheckAccount").Get<string[]>();
+                if (accountsToCheck == null || !accountsToCheck.Any())
                 {
-                    // --- 1. 讀取設定 ---
-                    var accountsToCheck = _config.GetSection("AdControllerConfig:UserPwdLastSetCheckAccount").Get<string[]>();
-                    if (accountsToCheck == null || !accountsToCheck.Any())
+                    _logger.LogWarning("在 appsettings.json 中找不到需要檢查的帳號清單 (AdControllerConfig:UserPwdLastSetCheckAccount)。");
+                    return new List<LdapUserPasswordStatus>();
+                }
+
+                var regularMailMapping = _config.GetSection("AdControllerConfig:TranslateMailDict").Get<Dictionary<string, string>>()
+                                        ?? new Dictionary<string, string>();
+                var mailMapping = new Dictionary<string, string>(regularMailMapping, StringComparer.OrdinalIgnoreCase);
+
+                int passwordMaxAgeDays = _config.GetValue("AdControllerConfig:PasswordMaxAgeDays", 90);
+                int notificationDays = _config.GetValue("AdControllerConfig:NotificationForwardDays", 14);
+
+                // --- 2. 建立 LDAP 連線與查詢 ---
+                using var ldapConnection = new LdapConnection();
+                await ldapConnection.ConnectAsync(_ldapConfig.Host, LdapConnection.DefaultPort);
+                await ldapConnection.BindAsync(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
+
+                string[] attributesToFetch = { "pwdLastSet", "sAMAccountName", "userPrincipalName", "mail", "userAccountControl", "cn", "displayName" };
+                var filterBuilder = new StringBuilder("(|");
+                foreach (var account in accountsToCheck)
+                {
+                    filterBuilder.Append($"(sAMAccountName={account})");
+                }
+                filterBuilder.Append(')');
+
+                var searchResults = await ldapConnection.SearchAsync(
+                    _ldapConfig.BaseDC, LdapConnection.ScopeSub, filterBuilder.ToString(), attributesToFetch, typesOnly: false);
+
+                // --- 3. 處理查詢結果並建立狀態列表 ---
+                var results = new List<LdapUserPasswordStatus>();
+                var notificationsToSend = new List<(LdapUserPasswordStatus status, string email)>(); // 暫存需要通知的項目
+
+                await foreach (var entry in searchResults)
+                {
+                    if (entry == null) continue;
+
+                    // 1. 呼叫純計算方法，獲取基礎狀態
+                    var status = CalculateAndBuildPasswordStatus(entry, passwordMaxAgeDays);
+                    results.Add(status); // 將計算結果加入列表
+
+                    // 2. 自行判斷是否需要通知
+                    bool isExpiringSoon = status.DaysUntilExpiration.HasValue &&
+                                            status.DaysUntilExpiration.Value <= notificationDays;
+
+                    if (isExpiringSoon)
                     {
-                        _logger.LogWarning("在 appsettings.json 中找不到需要檢查的帳號清單 (AdControllerConfig:UserPwdLastSetCheckAccount)。");
-                        return new List<LdapUserPasswordStatus>();
-                    }
-
-                    var regularMailMapping = _config.GetSection("AdControllerConfig:TranslateMailDict").Get<Dictionary<string, string>>()
-                                           ?? new Dictionary<string, string>();
-                    var mailMapping = new Dictionary<string, string>(regularMailMapping, StringComparer.OrdinalIgnoreCase);
-
-                    int passwordMaxAgeDays = _config.GetValue("AdControllerConfig:PasswordMaxAgeDays", 90);
-                    int notificationDays = _config.GetValue("AdControllerConfig:NotificationForwardDays", 14);
-
-                    // --- 2. 建立 LDAP 連線與查詢 ---
-                    using var ldapConnection = new LdapConnection();
-                    ldapConnection.Connect(_ldapConfig.Host, LdapConnection.DefaultPort);
-                    ldapConnection.Bind(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
-
-                    string[] attributesToFetch = { "pwdLastSet", "sAMAccountName", "userPrincipalName", "mail", "userAccountControl", "cn", "displayName" };
-                    var filterBuilder = new StringBuilder("(|");
-                    foreach (var account in accountsToCheck)
-                    {
-                        filterBuilder.Append($"(sAMAccountName={account})");
-                    }
-                    filterBuilder.Append(')');
-
-                    var searchResults = ldapConnection.Search(
-                        _ldapConfig.BaseDC, LdapConnection.ScopeSub, filterBuilder.ToString(), attributesToFetch, false);
-
-                    // --- 3. 處理查詢結果並建立狀態列表 ---
-                    var results = new List<LdapUserPasswordStatus>();
-                    var notificationsToSend = new List<(LdapUserPasswordStatus status, string email)>(); // 暫存需要通知的項目
-
-                    while (searchResults.HasMore())
-                    {
-                        var entry = searchResults.Next();
-                        if (entry == null) continue;
-
-                        // 1. 呼叫純計算方法，獲取基礎狀態
-                        var status = CalculateAndBuildPasswordStatus(entry, passwordMaxAgeDays);
-                        results.Add(status); // 將計算結果加入列表
-
-                        // 2. 自行判斷是否需要通知
-                        bool isExpiringSoon = status.DaysUntilExpiration.HasValue &&
-                                              status.DaysUntilExpiration.Value <= notificationDays;
-
-                        if (isExpiringSoon)
+                        // 3. 自行決定通知 Email (優先使用對應表)
+                        string notificationEmail = "";
+                        if (mailMapping.TryGetValue(status.User.SamAccountName, out var mappedMail))
                         {
-                            // 3. 自行決定通知 Email (優先使用對應表)
-                            string notificationEmail = "";
-                            if (mailMapping.TryGetValue(status.User.SamAccountName, out var mappedMail))
+                            notificationEmail = mappedMail;
+                        }
+                        else
+                        {
+                            string potentialEmail = status.User.Email;
+                            if (string.IsNullOrEmpty(potentialEmail))
                             {
-                                notificationEmail = mappedMail;
+                                // UPN 通常是用來登入的帳號，格式常常類似於電子郵件地址（例如 username@yourdomain.com）
+                                potentialEmail = status.User.UserPrincipalName;
                             }
-                            else
-                            {
-                                string potentialEmail = status.User.Email;
-                                if (string.IsNullOrEmpty(potentialEmail))
-                                {
-                                    // UPN 通常是用來登入的帳號，格式常常類似於電子郵件地址（例如 username@yourdomain.com）
-                                    potentialEmail = status.User.UserPrincipalName;
-                                }
-                                notificationEmail = potentialEmail ?? "";
-                            }
+                            notificationEmail = potentialEmail ?? "";
+                        }
 
-                            // 如果需要通知且 Email 有效，則加入待發送列表
-                            if (!string.IsNullOrEmpty(notificationEmail))
-                            {
-                                notificationsToSend.Add((status, notificationEmail));
-                            }
-                            else
-                            {
-                                _logger.LogWarning("帳號 {Account} 密碼即將到期，但找不到可用的通知信箱。", status.User.SamAccountName);
-                            }
+                        // 如果需要通知且 Email 有效，則加入待發送列表
+                        if (!string.IsNullOrEmpty(notificationEmail))
+                        {
+                            notificationsToSend.Add((status, notificationEmail));
+                        }
+                        else
+                        {
+                            _logger.LogWarning("帳號 {Account} 密碼即將到期，但找不到可用的通知信箱。", status.User.SamAccountName);
                         }
                     }
+                }
 
-                    // 4. 迴圈結束後，統一發送郵件
-                    foreach (var notification in notificationsToSend)
-                    {
-                        SendNotificationEmail(notification.status, notification.email);
-                    }
+                // 4. 迴圈結束後，統一發送郵件
+                foreach (var notification in notificationsToSend)
+                {
+                    SendNotificationEmail(notification.status, notification.email);
+                }
 
-                    _logger.LogInformation("密碼到期日檢查執行完畢。共處理 {Count} 個帳號。\n", results.Count);
-                    return results;
-                });
+                _logger.LogInformation("密碼到期日檢查執行完畢，共處理 {Count} 個帳號，如需查詢寄件資料請至MailSend-log檔案查閱。\n", results.Count);
+                return results;
             }
             catch (LdapException ex)
             {
@@ -267,56 +263,66 @@ namespace API.Services.LDAP
 
             try
             {
+                // --- Novell舊版本(2.0)操作 ---
                 // 使用 Task.Run 處理同步的 LDAP 操作
                 // 指「（主執行緒）會在這裡暫停，並且等待 Task.Run 裡面的所有工作全部完成。直到它完成，並且把 adUsers 這個 List 回傳之後，才會繼續往下執行後面的資料庫比對程式碼。」
                 // 它額外的好處是，在等待的過程中，不會佔用寶貴的伺服器請求執行緒，讓您的 API 能夠同時服務更多的使用者。
-                var adUsers = await Task.Run(() =>
+                //var adUsers = await Task.Run(() =>
+                //{
+                //    // 業務邏輯
+                //});
+                // ------------------------
+
+                using var ldapConnection = new LdapConnection();
+                await ldapConnection.ConnectAsync(_ldapConfig.Host, LdapConnection.DefaultPort);
+                await ldapConnection.BindAsync(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
+
+                string searchFilter = "(objectClass=user)";
+                string[] attributesToFetch = { "cn", "department", "mail", "memberOf", "streetAddress", "userAccountControl" };
+
+                var searchResults = await ldapConnection.SearchAsync(_ldapConfig.BaseDC, LdapConnection.ScopeSub, searchFilter, attributesToFetch, typesOnly: false);
+
+                var adUsers = new List<LdapUserHistory>();
+                await foreach (var entry in searchResults)
                 {
-                    using var ldapConnection = new LdapConnection();
-                    ldapConnection.Connect(_ldapConfig.Host, LdapConnection.DefaultPort);
-                    ldapConnection.Bind(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
+                    if (entry == null) continue;
 
-                    string searchFilter = "(objectClass=user)";
-                    string[] attributesToFetch = { "cn", "department", "mail", "memberOf", "streetAddress", "userAccountControl" };
-
-                    var searchResults = ldapConnection.Search(_ldapConfig.BaseDC, LdapConnection.ScopeSub, searchFilter, attributesToFetch, false);
-
-                    var tempAdUsers = new List<LdapUserHistory>();
-                    while (searchResults.HasMore())
+                    string memberOfValue = string.Empty;
+                    // 使用 LdapEntry 的 Contains 方法檢查屬性，確認這個使用者"至少"有一個群組，這是一個安全檢查
+                    if (entry.Contains("memberOf"))
                     {
-                        LdapEntry entry = searchResults.Next();
-                        if (entry == null) continue;
-
                         // memberOf (隸屬群組) 這個屬性是「多值」的，所以沒有使用GetSafeAttribute(單值)方法取值
-                        var attributes = entry.GetAttributeSet();
-                        string memberOfValue = string.Empty;
-                        if (attributes.ContainsKey("memberOf"))
-                        {
-                            // 只有在確定存在的情況下，才去執行 GetAttribute 和後續操作
-                            memberOfValue = string.Join(", ", entry.GetAttribute("memberOf").StringValueArray
-                                ?.Select(m => m.Split(',')[0].Replace("CN=", "")) ?? Array.Empty<string>());
-                        }
+                        // 如果存在，就用 .Get("memberOf") 取得代表這個屬性的「LdapAttribute 物件」，這個物件內部儲存了"所有"的群組 DN (Distinguished Name)
+                        var memberOfAttr = entry.Get("memberOf");
 
-                        var uacStr = entry.GetSafeAttribute("userAccountControl");
-                        int.TryParse(uacStr, out var uac);
+                        // 從這個物件中，讀取 .StringValueArray 屬性，
+                        // 這會回傳一個包含所有群組 DN 的「字串陣列」。
+                        // 例如：["CN=GroupA,OU=Users,...", "CN=GroupB,OU=Users,..."]
 
-                        // 判斷帳戶是否啟用 (ACCOUNTDISABLE flag is 0x0002)
-                        var isActive = (uac & 0x0002) == 0 ? "Active" : "Inactive";
-
-                        var adUser = new LdapUserHistory
-                        {
-                            IsActive = isActive,
-                            CommonName = entry.GetSafeAttribute("cn"),
-                            Department = entry.GetSafeAttribute("department"),
-                            StreetAddress = entry.GetSafeAttribute("streetAddress"),
-                            Email = entry.GetSafeAttribute("mail"),
-                            MemberOf = memberOfValue,
-                            UpdateTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
-                        };
-                        tempAdUsers.Add(adUser);
+                        // 最後執行字串拆解邏輯，對陣列中的每一個 DN 進行處理，只取出 CN 的部分 (群組名稱)，
+                        // 然後再用 string.Join 將它們組合成一個您資料庫需要的、用逗號分隔的單一字串
+                        memberOfValue = string.Join(", ", memberOfAttr.StringValueArray
+                            ?.Select(m => m.Split(',')[0].Replace("CN=", "")) ?? Array.Empty<string>());
                     }
-                    return tempAdUsers;
-                });
+
+                    var uacStr = entry.GetSafeAttribute("userAccountControl");
+                    int.TryParse(uacStr, out var uac);
+
+                    // 判斷帳戶是否啟用 (ACCOUNTDISABLE flag is 0x0002)
+                    var isActive = (uac & 0x0002) == 0 ? "Active" : "Inactive";
+
+                    var adUser = new LdapUserHistory
+                    {
+                        IsActive = isActive,
+                        CommonName = entry.GetSafeAttribute("cn"),
+                        Department = entry.GetSafeAttribute("department"),
+                        StreetAddress = entry.GetSafeAttribute("streetAddress"),
+                        Email = entry.GetSafeAttribute("mail"),
+                        MemberOf = memberOfValue,
+                        UpdateTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+                    };
+                    adUsers.Add(adUser);
+                }
 
                 result.TotalAdUsersProcessed = adUsers.Count;
 
@@ -411,56 +417,56 @@ namespace API.Services.LDAP
 
             try
             {
-                // 將所有同步的 LDAP 操作包裹在 Task.Run 中
-                return await Task.Run(() =>
+                using var connection = new LdapConnection();
+                await connection.ConnectAsync(_ldapConfig.Host, LdapConnection.DefaultPort);
+
+                // --- 第一階段：管理者綁定 & 查找使用者 DN ---
+                await connection.BindAsync(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
+
+                // 直接精確查找使用者
+                string searchFilter = $"(&(objectClass=user)(sAMAccountName={username}))";
+                var searchResults = await connection.SearchAsync(
+                    _ldapConfig.BaseDC,
+                    LdapConnection.ScopeSub,
+                    searchFilter,
+                    new[] { "dn" }, // 我們只需要 dn 這一個屬性
+                    typesOnly: false);
+
+                string userDn = null;
+                await using (var enumerator = searchResults.GetAsyncEnumerator())
                 {
-                    using var connection = new LdapConnection();
-                    connection.Connect(_ldapConfig.Host, LdapConnection.DefaultPort);
-
-                    // --- 第一階段：管理者綁定 & 查找使用者 DN ---
-                    connection.Bind(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
-
-                    // 直接精確查找使用者
-                    string searchFilter = $"(&(objectClass=user)(sAMAccountName={username}))";
-                    var searchResults = connection.Search(
-                        _ldapConfig.BaseDC,
-                        LdapConnection.ScopeSub,
-                        searchFilter,
-                        new[] { "dn" }, // 我們只需要 dn 這一個屬性
-                        false);
-
-                    string userDn = "";
-                    if (searchResults.HasMore())
+                    // 嘗試移動到第一筆 (也是唯一一筆) 結果
+                    if (await enumerator.MoveNextAsync())
                     {
-                        userDn = searchResults.Next().Dn;
+                        userDn = enumerator.Current.Dn;
                     }
+                }
 
-                    if (string.IsNullOrWhiteSpace(userDn))
-                    {
-                        _logger.LogWarning("驗證失敗：在 AD 中找不到使用者 '{Username}'。", username);
-                        return false;
-                    }
-
-                    // --- 第二階段：使用者綁定 & 驗證 ---
-                    try
-                    {
-                        // 使用找到的 userDn 和使用者提供的密碼進行第二次綁定
-                        connection.Bind(userDn, password);
-                        if (connection.Bound)
-                        {
-                            _logger.LogInformation("使用者 '{Username}' 驗證成功。", username);
-                            return true;
-                        }
-                    }
-                    catch (LdapException ex)
-                    {
-                        // 這裡捕捉到的 LdapException 通常代表密碼錯誤
-                        _logger.LogWarning(ex, "使用者 '{Username}' 驗證失敗：密碼錯誤或帳號問題。 LDAP 錯誤訊息: {LdapErrorMessage}", username, ex.ResultCode.ToString());
-                        return false;
-                    }
-
+                if (string.IsNullOrWhiteSpace(userDn))
+                {
+                    _logger.LogWarning("驗證失敗：在 AD 中找不到使用者 '{Username}'。", username);
                     return false;
-                });
+                }
+
+                // --- 第二階段：使用者綁定 & 驗證 ---
+                try
+                {
+                    // 使用找到的 userDn 和使用者提供的密碼進行第二次綁定
+                    await connection.BindAsync(userDn, password);
+                    if (connection.Bound)
+                    {
+                        _logger.LogInformation("使用者 '{Username}' 驗證成功。", username);
+                        return true;
+                    }
+                }
+                catch (LdapException ex)
+                {
+                    // 這裡捕捉到的 LdapException 通常代表密碼錯誤
+                    _logger.LogWarning(ex, "使用者 '{Username}' 驗證失敗：密碼錯誤或帳號問題。 LDAP 錯誤訊息: {LdapErrorMessage}", username, ex.ResultCode.ToString());
+                    return false;
+                }
+
+                return false;
             }
             catch (Exception ex)
             {
@@ -491,26 +497,27 @@ namespace API.Services.LDAP
 
             try
             {
-                return await Task.Run(() =>
+                using var connection = new LdapConnection();
+                await connection.ConnectAsync(_ldapConfig.Host, LdapConnection.DefaultPort);
+
+                // --- 第一階段：使用管理員帳號，確認 DN 是否存在 ---
+                bool userExists = false;
+                try
                 {
-                    using var connection = new LdapConnection();
-                    connection.Connect(_ldapConfig.Host, LdapConnection.DefaultPort);
+                    await connection.BindAsync(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
 
-                    // --- 第一階段：使用管理員帳號，確認 DN 是否存在 ---
-                    bool userExists = false;
-                    try
+                    var searchResults = await connection.SearchAsync(distinguishedName, LdapConnection.ScopeBase, "(objectClass=*)", new[] { "dn" }, typesOnly: false);
+
+                    // 使用非同步列舉器來處理 "No Such Object"
+                    await using (var enumerator = searchResults.GetAsyncEnumerator())
                     {
-                        connection.Bind(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
-
-                        var searchResults = connection.Search(distinguishedName, LdapConnection.ScopeBase, "(objectClass=*)", new[] { "dn" }, false);
-
-                        // 將 Next() 包裹在 try-catch 中來處理 "No Such Object"
                         try
                         {
-                            // 我們嘗試去拿取結果。這個操作會阻塞直到伺服器回應。
-                            var entry = searchResults.Next();
-                            // 如果上面這行程式碼沒有拋出例外，就代表物件確實存在。
-                            userExists = true;
+                            // 嘗試移動到第一筆
+                            if (await enumerator.MoveNextAsync())
+                            {
+                                userExists = (enumerator.Current != null);
+                            }
                         }
                         catch (LdapException ex) when (ex.ResultCode == LdapException.NoSuchObject)
                         {
@@ -519,38 +526,38 @@ namespace API.Services.LDAP
                             // 這明確地告訴我們使用者不存在，所以我們將 userExists 保持為 false。
                             userExists = false;
                         }
-                        // 任何其他的 LdapException 都會在這裡被忽略，並由外層的 catch 來處理。
                     }
-                    catch (LdapException ex)
-                    {
-                        _logger.LogError(ex, "直接綁定驗證的第一階段（管理者綁定）失敗。");
-                        throw;
-                    }
+                    // 任何其他的 LdapException 都會在這裡被忽略，並由外層的 catch 來處理。
+                }
+                catch (LdapException ex)
+                {
+                    _logger.LogError(ex, "直接綁定驗證的第一階段（管理者綁定）失敗。");
+                    throw;
+                }
 
-                    // --- 根據第一階段的結果，決定下一步 ---
-                    if (!userExists)
-                    {
-                        _logger.LogWarning("直接綁定驗證失敗：提供的識別名 (DN) 在目錄中不存在。DN: {DistinguishedName}", distinguishedName);
-                        return new SimpleApiResponse { IsSuccess = false, Message = "驗證失敗：使用者不存在。" };
-                    }
+                // --- 根據第一階段的結果，決定下一步 ---
+                if (!userExists)
+                {
+                    _logger.LogWarning("直接綁定驗證失敗：提供的識別名 (DN) 在目錄中不存在。DN: {DistinguishedName}", distinguishedName);
+                    return new SimpleApiResponse { IsSuccess = false, Message = "驗證失敗：使用者不存在。" };
+                }
 
-                    // --- 第二階段：DN 已確認存在，現在嘗試用使用者憑證綁定 ---
-                    try
-                    {
-                        connection.Bind(distinguishedName, password);
+                // --- 第二階段：DN 已確認存在，現在嘗試用使用者憑證綁定 ---
+                try
+                {
+                    await connection.BindAsync(distinguishedName, password);
 
-                        string commonName = distinguishedName.Split(',')[0].Split('=')[1];
-                        string successMessage = $"{commonName} Login Successful";
-                        _logger.LogInformation("直接綁定驗證成功。DN: {DistinguishedName}", distinguishedName);
+                    string commonName = distinguishedName.Split(',')[0].Split('=')[1];
+                    string successMessage = $"{commonName} Login Successful";
+                    _logger.LogInformation("直接綁定驗證成功。DN: {DistinguishedName}", distinguishedName);
 
-                        return new SimpleApiResponse { IsSuccess = true, Message = successMessage };
-                    }
-                    catch (LdapException ex) when (ex.ResultCode == LdapException.InvalidCredentials)
-                    {
-                        _logger.LogWarning("直接綁定驗證失敗：密碼錯誤。DN: {DistinguishedName}", distinguishedName);
-                        return new SimpleApiResponse { IsSuccess = false, Message = "驗證失敗：密碼錯誤。" };
-                    }
-                });
+                    return new SimpleApiResponse { IsSuccess = true, Message = successMessage };
+                }
+                catch (LdapException ex) when (ex.ResultCode == LdapException.InvalidCredentials)
+                {
+                    _logger.LogWarning("直接綁定驗證失敗：密碼錯誤。DN: {DistinguishedName}", distinguishedName);
+                    return new SimpleApiResponse { IsSuccess = false, Message = "驗證失敗：密碼錯誤。" };
+                }
             }
             catch (Exception ex)
             {
@@ -571,35 +578,31 @@ namespace API.Services.LDAP
 
             try
             {
-                return await Task.Run(() =>
+                using var ldapConnection = new LdapConnection();
+                await ldapConnection.ConnectAsync(_ldapConfig.Host, LdapConnection.DefaultPort);
+                await ldapConnection.BindAsync(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
+
+                // 建立 OR 條件的查詢
+                string searchFilter = $"(|(sAMAccountName={accountOrCommonName})(cn={accountOrCommonName}))";
+                string[] attributesToFetch = { "pwdLastSet", "sAMAccountName", "userPrincipalName", "mail", "userAccountControl", "cn", "displayName" };
+
+                var searchResults = await ldapConnection.SearchAsync(_ldapConfig.BaseDC, LdapConnection.ScopeSub, searchFilter, attributesToFetch, typesOnly: false);
+
+                await foreach (var entry in searchResults)
                 {
-                    using var ldapConnection = new LdapConnection();
-                    ldapConnection.Connect(_ldapConfig.Host, LdapConnection.DefaultPort);
-                    ldapConnection.Bind(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
-
-                    // 建立 OR 條件的查詢
-                    string searchFilter = $"(|(sAMAccountName={accountOrCommonName})(cn={accountOrCommonName}))";
-                    string[] attributesToFetch = { "pwdLastSet", "sAMAccountName", "userPrincipalName", "mail", "userAccountControl", "cn", "displayName" };
-
-                    var searchResults = ldapConnection.Search(_ldapConfig.BaseDC, LdapConnection.ScopeSub, searchFilter, attributesToFetch, false);
-
-                    if (searchResults.HasMore())
+                    if (entry != null)
                     {
-                        var entry = searchResults.Next();
-                        if (entry != null)
-                        {
-                            // 讀取設定
-                            int passwordMaxAgeDays = _config.GetValue("AdControllerConfig:PasswordMaxAgeDays", 90);
+                        // 讀取設定
+                        int passwordMaxAgeDays = _config.GetValue("AdControllerConfig:PasswordMaxAgeDays", 90);
 
-                            var status = CalculateAndBuildPasswordStatus(entry, passwordMaxAgeDays);
-                            _logger.LogInformation("成功查詢到使用者 '{AccountOrCn}' 的密碼狀態。", accountOrCommonName);
-                            return status;
-                        }
+                        var status = CalculateAndBuildPasswordStatus(entry, passwordMaxAgeDays);
+                        _logger.LogInformation("成功查詢到使用者 '{AccountOrCn}' 的密碼狀態。", accountOrCommonName);
+                        return status;
                     }
+                }
 
-                    _logger.LogWarning("在 AD 中找不到使用者 '{AccountOrCn}'。", accountOrCommonName);
-                    return null; // 找不到使用者，回傳 null
-                });
+                _logger.LogWarning("在 AD 中找不到使用者 '{AccountOrCn}'。", accountOrCommonName);
+                return null; // 迴圈結束了都沒回傳，代表找不到使用者
             }
             catch (Exception ex)
             {
@@ -622,82 +625,78 @@ namespace API.Services.LDAP
 
             try
             {
-                return await Task.Run(() =>
+                using var connection = new LdapConnection();
+                await connection.ConnectAsync(_ldapConfig.Host, LdapConnection.DefaultPort);
+                await connection.BindAsync(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
+
+                // 組合查詢條件
+                // • &：AND，全部條件都要符合（常用於單一查詢或多條件查詢）。 範例：$"(&(sAMAccountName={username}))"
+                // • |：OR， 符合任一條件即可（常用於多帳號查詢）。
+                var searchFilter = new StringBuilder("(|");
+                foreach (var username in accountNames)
                 {
-                    using var connection = new LdapConnection();
-                    connection.Connect(_ldapConfig.Host, LdapConnection.DefaultPort);
-                    connection.Bind(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
+                    searchFilter.Append($"(sAMAccountName={username})");
+                }
+                searchFilter.Append(")");
 
-                    // 組合查詢條件
-                    // • &：AND，全部條件都要符合（常用於單一查詢或多條件查詢）。 範例：$"(&(sAMAccountName={username}))"
-                    // • |：OR， 符合任一條件即可（常用於多帳號查詢）。
-                    var searchFilter = new StringBuilder("(|");
-                    foreach (var username in accountNames)
-                    {
-                        searchFilter.Append($"(sAMAccountName={username})");
-                    }
-                    searchFilter.Append(")");
+                // 建立額外條件的物件 (超時設定)
+                LdapSearchConstraints searchConstraints = new LdapSearchConstraints();
+                searchConstraints.TimeLimit = 30000; // 30秒超時
 
-                    // 建立額外條件的物件 (超時設定)
-                    LdapSearchConstraints searchConstraints = new LdapSearchConstraints();
-                    searchConstraints.TimeLimit = 30000; // 30秒超時
-
-                    // 查詢所有需要的屬性以填充 LdapUser 模型
-                    string[] attributesToFetch = {
+                // 查詢所有需要的屬性以填充 LdapUser 模型
+                string[] attributesToFetch = {
                         "sAMAccountName", "cn", "sn", "givenName", "userPrincipalName",
                         "displayName", "mail", "telephoneNumber", "title", "department",
                         "company", "description", "streetAddress"
                     };
 
-                    var searchResults = connection.Search(
-                        _ldapConfig.BaseDC, // 搜尋的基礎 DN
-                        LdapConnection.ScopeSub, // 搜尋的範圍，這裡使用 SUB 表示子樹
-                        searchFilter.ToString(), // 搜尋的過濾條件
-                        attributesToFetch, // 返回的屬性，若設定 null 表示返回所有屬性
-                        false, // 是否返回刪除的條目
-                        searchConstraints
-                    );
+                var searchResults = await connection.SearchAsync(
+                    _ldapConfig.BaseDC, // 搜尋的基礎 DN
+                    LdapConnection.ScopeSub, // 搜尋的範圍，這裡使用 SUB 表示子樹
+                    searchFilter.ToString(), // 搜尋的過濾條件
+                    attributesToFetch, // 返回的屬性，若設定 null 表示返回所有屬性
+                    typesOnly: false, // 是否只返回屬性的名稱 (Type) 而非值 (Value)
+                    searchConstraints
+                );
 
-                    while (searchResults.HasMore())
+                await foreach (var entry in searchResults)
+                {
+                    try
                     {
-                        try
-                        {
-                            var entry = searchResults.Next(); // 避免競態條件(就是避免AD那邊還沒查到資料時，程式跑太快就開始了)
-                            if (entry == null) continue;
+                        if (entry == null) continue;
 
-                            var user = new LdapUser
-                            {
-                                SamAccountName = entry.GetSafeAttribute("sAMAccountName"),
-                                CommonName = entry.GetSafeAttribute("cn"),
-                                Surname = entry.GetSafeAttribute("sn"),
-                                GivenName = entry.GetSafeAttribute("givenName"),
-                                UserPrincipalName = entry.GetSafeAttribute("userPrincipalName"),
-                                DisplayName = entry.GetSafeAttribute("displayName"),
-                                Email = entry.GetSafeAttribute("mail"),
-                                TelephoneNumber = entry.GetSafeAttribute("telephoneNumber"),
-                                Title = entry.GetSafeAttribute("title"),
-                                Department = entry.GetSafeAttribute("department"),
-                                Company = entry.GetSafeAttribute("company"),
-                                Description = entry.GetSafeAttribute("description"),
-                                StreetAddress = entry.GetSafeAttribute("streetAddress"),
-                                DistinguishedName = entry.Dn
-                            };
-
-                            if (!string.IsNullOrEmpty(user.SamAccountName))
-                            {
-                                usersDictionary[user.SamAccountName] = user;
-                            }
-                        }
-                        catch (LdapException ex)
+                        var user = new LdapUser
                         {
-                            _logger.LogError(ex, "在批次獲取使用者資訊的迴圈中發生 LDAP 錯誤。");
-                            continue; // 忽略單一錯誤的條目，繼續處理下一個
+                            SamAccountName = entry.GetSafeAttribute("sAMAccountName"),
+                            CommonName = entry.GetSafeAttribute("cn"),
+                            Surname = entry.GetSafeAttribute("sn"),
+                            GivenName = entry.GetSafeAttribute("givenName"),
+                            UserPrincipalName = entry.GetSafeAttribute("userPrincipalName"),
+                            DisplayName = entry.GetSafeAttribute("displayName"),
+                            Email = entry.GetSafeAttribute("mail"),
+                            TelephoneNumber = entry.GetSafeAttribute("telephoneNumber"),
+                            Title = entry.GetSafeAttribute("title"),
+                            Department = entry.GetSafeAttribute("department"),
+                            Company = entry.GetSafeAttribute("company"),
+                            Description = entry.GetSafeAttribute("description"),
+                            StreetAddress = entry.GetSafeAttribute("streetAddress"),
+                            DistinguishedName = entry.Dn
+                        };
+
+                        if (!string.IsNullOrEmpty(user.SamAccountName))
+                        {
+                            usersDictionary[user.SamAccountName] = user;
                         }
                     }
+                    catch (LdapException ex)
+                    {
+                        _logger.LogError(ex, "在批次獲取使用者資訊的迴圈中發生 LDAP 錯誤。");
+                        continue; // 忽略單一錯誤的條目，繼續處理下一個
+                    }
+                }
 
-                    _logger.LogInformation("您提供的清單中，共有 {FoundCount} 筆資料成功在AD中查詢 (您的清單數量為 {TotalCount} 個使用者資訊。", usersDictionary.Count, accountNames.Count());
-                    return usersDictionary;
-                });
+                _logger.LogInformation("您提供的清單中，共有 {FoundCount} 筆資料成功在AD中查詢 (您的清單數量為 {TotalCount} 個使用者資訊。", usersDictionary.Count, accountNames.Count());
+                return usersDictionary;
             }
             catch (Exception ex)
             {
@@ -714,77 +713,69 @@ namespace API.Services.LDAP
 
             try
             {
-                // 將所有同步的 LDAP 操作包裹在 Task.Run 中
-                results = await Task.Run(() =>
-                {
-                    var userStatusList = new List<LdapUserPasswordStatus>();
-                    using var connection = new LdapConnection();
-                    connection.Connect(_ldapConfig.Host, LdapConnection.DefaultPort);
-                    connection.Bind(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
+                var userStatusList = new List<LdapUserPasswordStatus>();
+                using var connection = new LdapConnection();
+                await connection.ConnectAsync(_ldapConfig.Host, LdapConnection.DefaultPort);
+                await connection.BindAsync(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
 
-                    // 1. 查詢 AD 所有使用者資料
-                    string searchFilter = "(objectClass=user)";
-                    // 需要獲取 CalculateAndBuildPasswordStatus 所需的所有屬性，再加上 userAccountControl
-                    string[] attributesToFetch = {
+                // 1. 查詢 AD 所有使用者資料
+                string searchFilter = "(objectClass=user)";
+                // 需要獲取 CalculateAndBuildPasswordStatus 所需的所有屬性，再加上 userAccountControl
+                string[] attributesToFetch = {
                         "sAMAccountName", "cn", "sn", "givenName", "userPrincipalName",
                         "displayName", "mail", "telephoneNumber", "title", "department",
                         "company", "description", "streetAddress", "pwdLastSet", "userAccountControl"
                     };
 
-                    // 加入超時設定
-                    LdapSearchConstraints searchConstraints = new LdapSearchConstraints();
-                    searchConstraints.TimeLimit = 30000; // 30秒超時
+                // 加入超時設定
+                LdapSearchConstraints searchConstraints = new LdapSearchConstraints();
+                searchConstraints.TimeLimit = 30000; // 30秒超時
 
-                    var searchResults = connection.Search(
-                        _ldapConfig.BaseDC,
-                        LdapConnection.ScopeSub,
-                        searchFilter,
-                        attributesToFetch,
-                        false,
-                        searchConstraints
-                    );
+                var searchResults = await connection.SearchAsync(
+                    _ldapConfig.BaseDC,
+                    LdapConnection.ScopeSub,
+                    searchFilter,
+                    attributesToFetch,
+                    typesOnly: false,
+                    searchConstraints
+                );
 
-                    // 讀取計算所需的設定
-                    int passwordMaxAgeDays = _config.GetValue("AdControllerConfig:PasswordMaxAgeDays", 90);
-                    int notificationDays = _config.GetValue("AdControllerConfig:NotificationForwardDays", 14);
+                // 讀取計算所需的設定
+                int passwordMaxAgeDays = _config.GetValue("AdControllerConfig:PasswordMaxAgeDays", 90);
+                int notificationDays = _config.GetValue("AdControllerConfig:NotificationForwardDays", 14);
 
-                    // 2. 遍歷結果並處理
-                    while (searchResults.HasMore())
+                // 2. 遍歷結果並處理
+                await foreach (var entry in searchResults)
+                {
+                    try
                     {
-                        try
+                        if (entry == null) continue;
+
+                        var status = CalculateAndBuildPasswordStatus(entry, passwordMaxAgeDays);
+
+                        // 暫時無需求，若有需要時上方 attributesToFetch 要補 memberOf 屬性
+                        if (entry.Contains("memberOf"))
                         {
-                            var entry = searchResults.Next();
-                            if (entry == null) continue;
-
-                            var status = CalculateAndBuildPasswordStatus(entry, passwordMaxAgeDays);
-
-                            // 暫時無需求，若有需要時上方要補 memberOf 屬性
-                            var attributes = entry.GetAttributeSet();
-                            if (attributes.ContainsKey("memberOf"))
-                            {
-                                status.User.MemberOf = entry.GetAttribute("memberOf").StringValueArray
-                                    ?.Select(m => m.Split(',')[0].Replace("CN=", ""))
-                                    .ToList() ?? new List<string>();
-                            }
-                            else
-                            {
-                                status.User.MemberOf = new List<string>(); // 確保是空列表而不是 null
-                            }
-
-                            userStatusList.Add(status);
+                            status.User.MemberOf = entry.Get("memberOf").StringValueArray
+                                ?.Select(m => m.Split(',')[0].Replace("CN=", ""))
+                                .ToList() ?? new List<string>();
                         }
-                        catch (LdapException ex)
+                        else
                         {
-                            _logger.LogError(ex, "在獲取所有使用者狀態的迴圈中，處理單一條目時發生 LDAP 錯誤。");
-                            continue; // 忽略單一錯誤，繼續處理下一個
+                            status.User.MemberOf = new List<string>(); // 確保是空列表而不是 null
                         }
+
+                        userStatusList.Add(status);
                     }
+                    catch (LdapException ex)
+                    {
+                        _logger.LogError(ex, "在獲取所有使用者狀態的迴圈中，處理單一條目時發生 LDAP 錯誤。");
+                        continue; // 忽略單一錯誤，繼續處理下一個
+                    }
+                }
 
-                    _logger.LogInformation("成功獲取並處理了 {Count} 個 AD 使用者的狀態資訊。", userStatusList.Count);
-                    return userStatusList;
-                });
-
-                return results;
+                _logger.LogInformation("成功獲取並處理了 {Count} 個 AD 使用者的狀態資訊。", userStatusList.Count);
+                return userStatusList; // await foreach 結束後，直接回傳 userStatusList
             }
             catch (Exception ex)
             {
@@ -817,17 +808,15 @@ namespace API.Services.LDAP
 
                 // --- 2. 執行同步的 LDAP 操作 ---
                 // 將所有 LDAP 操作包裹在 Task.Run 中，使其在背景執行緒上運行
-                return await Task.Run(() =>
-                {
-                    using var connection = new LdapConnection();
-                    connection.Connect(_ldapConfig.Host, LdapConnection.DefaultPort);
-                    connection.Bind(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
+                using var connection = new LdapConnection();
+                await connection.ConnectAsync(_ldapConfig.Host, LdapConnection.DefaultPort);
+                await connection.BindAsync(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
 
-                    string userCN = newUserModel.Surname + newUserModel.GivenName;
-                    string userDN = $"cn={userCN},{roleInfo.basic_dn}";
+                string userCN = newUserModel.Surname + newUserModel.GivenName;
+                string userDN = $"cn={userCN},{roleInfo.basic_dn}";
 
-                    // --- 3. 建構使用者屬性 ---
-                    var attributeSet = new LdapAttributeSet
+                // --- 3. 建構使用者屬性 ---
+                var attributeSet = new LdapAttributeSet
                     {
                         new LdapAttribute("objectClass", new[] { "top", "person", "organizationalPerson", "user" }),
                         new LdapAttribute("sAMAccountName", newUserModel.SamAccountName),
@@ -847,32 +836,31 @@ namespace API.Services.LDAP
                         new LdapAttribute("userAccountControl", "544") // 用戶帳號啟用並強制密碼變更
                     };
 
-                    // --- 4. 建立使用者 ---
-                    var newEntry = new LdapEntry(userDN, attributeSet);
-                    connection.Add(newEntry);
-                    _logger.LogInformation("用戶 {SamAccountName} 於 DN: {UserDN} 新增成功。", newUserModel.SamAccountName, userDN);
+                // --- 4. 建立使用者 ---
+                var newEntry = new LdapEntry(userDN, attributeSet);
+                await connection.AddAsync(newEntry);
+                _logger.LogInformation("用戶 {SamAccountName} 於 DN: {UserDN} 新增成功。", newUserModel.SamAccountName, userDN);
 
-                    // --- 5. 加入群組 ---
-                    if (!string.IsNullOrEmpty(roleInfo.memberof))
+                // --- 5. 加入群組 ---
+                if (!string.IsNullOrEmpty(roleInfo.memberof))
+                {
+                    string[] groupDNs = roleInfo.memberof.Split(';');
+                    foreach (var groupDn in groupDNs)
                     {
-                        string[] groupDNs = roleInfo.memberof.Split(';');
-                        foreach (var groupDn in groupDNs)
-                        {
-                            if (string.IsNullOrWhiteSpace(groupDn)) continue;
+                        if (string.IsNullOrWhiteSpace(groupDn)) continue;
 
-                            var addModification = new LdapModification(LdapModification.Add, new LdapAttribute("member", userDN));
-                            connection.Modify(groupDn, addModification);
-                            _logger.LogInformation("用戶 {SamAccountName} 成功加入群組 {GroupDN}。", newUserModel.SamAccountName, groupDn);
-                        }
+                        var addModification = new LdapModification(LdapModification.Add, new LdapAttribute("member", userDN));
+                        await connection.ModifyAsync(groupDn, addModification);
+                        _logger.LogInformation("用戶 {SamAccountName} 成功加入群組 {GroupDN}。", newUserModel.SamAccountName, groupDn);
                     }
+                }
 
-                    return new AdUserCreateResult
-                    {
-                        IsSuccess = true,
-                        Message = $"用戶 {newUserModel.SamAccountName} 建立成功。",
-                        UserDistinguishedName = userDN
-                    };
-                });
+                return new AdUserCreateResult
+                {
+                    IsSuccess = true,
+                    Message = $"用戶 {newUserModel.SamAccountName} 建立成功。",
+                    UserDistinguishedName = userDN
+                };
             }
             catch (LdapException ex)
             {
@@ -903,79 +891,79 @@ namespace API.Services.LDAP
 
             try
             {
-                // 將所有同步的 LDAP 操作包裹在 Task.Run 中
-                return await Task.Run(() =>
+                using var connection = new LdapConnection();
+                await connection.ConnectAsync(_ldapConfig.Host, LdapConnection.DefaultPort);
+                await connection.BindAsync(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
+
+                // --- 2. 查找目標使用者 ---
+                // 使用精確查詢找到使用者的 DN
+                string searchFilter = $"(&(objectClass=user)(sAMAccountName={username}))";
+                LdapSearchConstraints searchConstraints = new LdapSearchConstraints { TimeLimit = 30000 };
+                string userDn = null;
+                try
                 {
-                    using var connection = new LdapConnection();
-                    connection.Connect(_ldapConfig.Host, LdapConnection.DefaultPort);
-                    connection.Bind(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
+                    var searchResults = await connection.SearchAsync(_ldapConfig.BaseDC, LdapConnection.ScopeSub, searchFilter, new[] { "dn" }, typesOnly: false, searchConstraints);
 
-                    // --- 2. 查找目標使用者 ---
-                    // 使用精確查詢找到使用者的 DN
-                    string searchFilter = $"(&(objectClass=user)(sAMAccountName={username}))";
-                    LdapSearchConstraints searchConstraints = new LdapSearchConstraints { TimeLimit = 30000 };
-                    string userDn = null;
-
-                    try
+                    // 使用非同步列舉器安全地取得第一筆資料
+                    await using (var enumerator = searchResults.GetAsyncEnumerator())
                     {
-                        var searchResults = connection.Search(_ldapConfig.BaseDC, LdapConnection.ScopeSub, searchFilter, new[] { "dn" }, false, searchConstraints);
-                        if (searchResults.HasMore())
+                        if (await enumerator.MoveNextAsync())
                         {
-                            userDn = searchResults.Next()?.Dn;
+                            userDn = enumerator.Current.Dn;
                         }
                     }
-                    catch (LdapException ex)
-                    {
-                        _logger.LogError(ex, "在查找使用者 '{Username}' 以進行更新時發生 LDAP 錯誤。", username);
-                        throw; // 重新拋出，由外層 catch 處理
-                    }
+                }
+                catch (LdapException ex)
+                {
+                    _logger.LogError(ex, "在查找使用者 '{Username}' 以進行更新時發生 LDAP 錯誤。", username);
+                    throw; // 重新拋出，由外層 catch 處理
+                }
 
-                    if (string.IsNullOrWhiteSpace(userDn))
-                    {
-                        _logger.LogWarning("更新使用者失敗：在 AD 中找不到使用者 '{Username}'。", username);
-                        return new SimpleApiResponse { IsSuccess = false, Message = $"找不到使用者 '{username}'。" };
-                    }
+                if (string.IsNullOrWhiteSpace(userDn))
+                {
+                    _logger.LogWarning("更新使用者失敗：在 AD 中找不到使用者 '{Username}'。", username);
+                    return new SimpleApiResponse { IsSuccess = false, Message = $"找不到使用者 '{username}'。" };
+                }
 
-                    // --- 3. 建立修改集 (Modification Set) ---
-                    // 根據 AdUserUpdateModel 中非 null 的屬性，動態建立修改列表
-                    var modificationList = new ArrayList();
+                // --- 3. 建立修改集 (Modification Set) ---
+                // 根據 AdUserUpdateModel 中非 null 的屬性，動態建立修改列表
+                var modificationList = new ArrayList();
 
-                    // 輔助方法，用於安全地添加修改項
-                    void AddModificationIfNotNull(string attributeName, string value)
+                // 輔助方法，用於安全地添加修改項
+                void AddModificationIfNotNull(string attributeName, string value)
+                {
+                    if (value != null) // 只處理非 null 的值
                     {
-                        if (value != null) // 只處理非 null 的值
-                        {
-                            modificationList.Add(new LdapModification(LdapModification.Replace, new LdapAttribute(attributeName, value)));
-                        }
+                        modificationList.Add(new LdapModification(LdapModification.Replace, new LdapAttribute(attributeName, value)));
                     }
+                }
 
-                    // 將 AdUserUpdateModel 的屬性映射回 AD 屬性名稱
-                    AddModificationIfNotNull("description", updateData.Description);
-                    AddModificationIfNotNull("physicalDeliveryOfficeName", updateData.Office);
-                    AddModificationIfNotNull("streetAddress", updateData.EmployeeId);
-                    AddModificationIfNotNull("department", updateData.Department);
-                    AddModificationIfNotNull("title", updateData.Title);
+                // 將 AdUserUpdateModel 的屬性映射回 AD 屬性名稱
+                AddModificationIfNotNull("description", updateData.Description);
+                AddModificationIfNotNull("physicalDeliveryOfficeName", updateData.Office);
+                AddModificationIfNotNull("streetAddress", updateData.EmployeeId);
+                AddModificationIfNotNull("department", updateData.Department);
+                AddModificationIfNotNull("title", updateData.Title);
 
-                    if (modificationList.Count == 0)
-                    {
-                        _logger.LogInformation("使用者 '{Username}' 沒有提供任何需要更新的資訊。", username);
-                        return new SimpleApiResponse { IsSuccess = true, Message = "沒有提供任何需要更新的資訊。" };
-                    }
+                if (modificationList.Count == 0)
+                {
+                    _logger.LogInformation("使用者 '{Username}' 沒有提供任何需要更新的資訊。", username);
+                    return new SimpleApiResponse { IsSuccess = true, Message = "沒有提供任何需要更新的資訊。" };
+                }
 
-                    // --- 4. 執行修改 ---
-                    try
-                    {
-                        LdapModification[] mods = (LdapModification[])modificationList.ToArray(typeof(LdapModification));
-                        connection.Modify(userDn, mods);
-                        _logger.LogInformation("成功更新使用者 '{Username}' 的資訊。", username);
-                        return new SimpleApiResponse { IsSuccess = true, Message = $"使用者 '{username}' 的資訊已成功更新。" };
-                    }
-                    catch (LdapException ex)
-                    {
-                        _logger.LogError(ex, "更新使用者 '{Username}' (DN: {UserDn}) 時發生 LDAP 錯誤。", username, userDn);
-                        return new SimpleApiResponse { IsSuccess = false, Message = $"更新時發生 LDAP 錯誤: {ex.LdapErrorMessage}" };
-                    }
-                });
+                // --- 4. 執行修改 ---
+                try
+                {
+                    LdapModification[] mods = (LdapModification[])modificationList.ToArray(typeof(LdapModification));
+                    await connection.ModifyAsync(userDn, mods);
+                    _logger.LogInformation("成功更新使用者 '{Username}' 的資訊。", username);
+                    return new SimpleApiResponse { IsSuccess = true, Message = $"使用者 '{username}' 的資訊已成功更新。" };
+                }
+                catch (LdapException ex)
+                {
+                    _logger.LogError(ex, "更新使用者 '{Username}' (DN: {UserDn}) 時發生 LDAP 錯誤。", username, userDn);
+                    return new SimpleApiResponse { IsSuccess = false, Message = $"更新時發生 LDAP 錯誤: {ex.LdapErrorMessage}" };
+                }
             }
             catch (Exception ex)
             {
@@ -988,10 +976,10 @@ namespace API.Services.LDAP
         /// 從 AD 中指定的 SearchBase 遞迴獲取所有使用者物件，並包含稽核所需屬性。
         /// </summary>
         /// <returns>LdapUser 物件的列表。若發生錯誤則回傳空列表。</returns>
-        private IEnumerable<LdapUser> GetAllUsersForAudit()
+        private async Task<IEnumerable<LdapUser>> GetAllUsersForAuditAsync()
         {
             var users = new List<LdapUser>();
-            
+
             using (var conn = new LdapConnection())
             {
                 try
@@ -999,8 +987,8 @@ namespace API.Services.LDAP
                     _logger.LogInformation("正在連線至 AD 並獲取所有稽核所需的使用者...");
 
                     // 連線與綁定;
-                    conn.Connect(_ldapConfig.Host, LdapConnection.DefaultPort);
-                    conn.Bind(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
+                    await conn.ConnectAsync(_ldapConfig.Host, LdapConnection.DefaultPort);
+                    await conn.BindAsync(_ldapConfig.AdminBaseDC, _ldapConfig.AdminPassword);
 
                     // 定義稽核報表所需回傳的屬性
                     string[] attrs = {
@@ -1016,60 +1004,88 @@ namespace API.Services.LDAP
                     searchConstraints.TimeLimit = 30000; // 30秒超時
 
                     // 執行搜尋
-                    var searchResults = conn.Search(
+                    var searchResults = await conn.SearchAsync(
                         searchBase,                   // 使用設定檔中的 SearchBase
                         LdapConnection.ScopeSub,      // 遞迴搜尋所有子 OU
                         searchFilter,                 // 篩選條件：僅使用者物件
                         attrs,                        // 指定要獲取的屬性
-                        false,                        // 不只獲取屬性名稱，也要獲取值
+                        typesOnly: false,             // 是否只返回屬性的名稱 (Type) 而非值 (Value)
                         searchConstraints
                     );
 
-                    // 遍歷搜尋結果並轉換為 LdapUser 物件
-                    while (searchResults.HasMore())
+                    // =================================================================================
+                    // 我們不使用 "await foreach (var entry in searchResults)" 的標準語法，
+                    // 而是改用手動的 "await using + while" 迴圈。
+                    //
+                    // 為什麼？
+                    // 根據 LOG 顯示，從網域根 (DC=...) 搜尋時，AD 伺服器會傳回 "轉介 (Referral)"
+                    // (例如: ForestDnsZones)，這會導致 Novell 套件 v4.0.0 的非同步 API
+                    // 在 `await foreach` 內部（技術上是在 MoveNextAsync()）拋出 "LdapReferralException"。
+                    //
+                    // 根據 v4.0.0 的 API 定義，`LdapSearchConstraints` 中的 `ReferralFollowing` 屬性
+                    // 在 "非同步" 操作中會被忽略，所以我們無法透過設定來關閉這個錯誤。
+                    //
+                    // 解決方案，就是手動迭代 (MoveNextAsync)，
+                    // 並在迴圈 "內部" 放置一個 try-catch 區塊，
+                    // 專門用來捕捉這個 "LdapReferralException"，然後忽略它並繼續執行。
+                    // 這樣程式就能成功忽略無關的轉介 (如 DNS 區域)，並繼續完成我們真正需要的
+                    // 使用者 OU 搜尋。
+                    // =================================================================================
+                    await using (var enumerator = searchResults.GetAsyncEnumerator())
                     {
-                        LdapEntry entry = null;
-                        try
+                        bool hasMore = true;
+                        while (hasMore)
                         {
-                            entry = searchResults.Next();
-                            if (entry == null) continue;
-
-                            // 判斷帳戶是否停用
-                            var uacStr = entry.GetSafeAttribute("userAccountControl");
-                            int.TryParse(uacStr, out var uac);
-                            var isActive = (uac & 0x0002) == 0 ? "Active" : "Inactive";
-
-                            // memberOf (隸屬群組) 這個屬性是「多值」的，所以沒有使用GetSafeAttribute(單值)方法取值
-                            var attributes = entry.GetAttributeSet();
-                            var memberOfList = new List<string>();
-                            if (attributes.ContainsKey("memberOf"))
+                            LdapEntry entry = null;
+                            try
                             {
-                                // 直接將處理後的結果轉換為 List<string> 並指派
-                                memberOfList = entry.GetAttribute("memberOf").StringValueArray
-                                    ?.Select(m => m.Split(',')[0].Replace("CN=", ""))
-                                    .ToList() ?? new List<string>();
+                                // 嘗試移動到下一個結果
+                                hasMore = await enumerator.MoveNextAsync();
+                                if (!hasMore) break; // 如果沒有更多結果，跳出 while 迴圈
+
+                                entry = enumerator.Current;
+                                if (entry == null) continue;
+
+                                // 判斷帳戶是否停用
+                                var uacStr = entry.GetSafeAttribute("userAccountControl");
+                                int.TryParse(uacStr, out var uac);
+                                var isActive = (uac & 0x0002) == 0 ? "Active" : "Inactive";
+
+                                // memberOf (隸屬群組) 這個屬性是「多值」的，所以沒有使用GetSafeAttribute(單值)方法取值
+                                var memberOfList = new List<string>();
+                                if (entry.Contains("memberOf"))
+                                {
+                                    memberOfList = entry.Get("memberOf").StringValueArray
+                                        ?.Select(m => m.Split(',')[0].Replace("CN=", ""))
+                                        .ToList() ?? new List<string>();
+                                }
+
+                                users.Add(new LdapUser
+                                {
+                                    SamAccountName = entry.GetSafeAttribute("sAMAccountName"),
+                                    DisplayName = entry.GetSafeAttribute("displayName"),
+                                    DistinguishedName = entry.Dn,
+                                    MemberOf = memberOfList,
+                                    IsActive = isActive
+                                });
                             }
-
-                            users.Add(new LdapUser
+                            catch (LdapReferralException refEx)
                             {
-                                SamAccountName = entry.GetSafeAttribute("sAMAccountName"),
-                                DisplayName = entry.GetSafeAttribute("displayName"),
-                                DistinguishedName = entry.GetSafeAttribute("distinguishedName"),
-                                MemberOf = memberOfList,
-                                IsActive = isActive
-                            });
-                        }
-                        catch (LdapException ex)
-                        {
-                            _logger.LogInformation(ex, "{MethodName} 偵測到一個無法處理的 LDAP 條目並已跳過。這通常是無害的系統物件。", nameof(GetAllUsersForAudit));
-                            continue; // 忽略單一錯誤，繼續處理下一個
+                                _logger.LogWarning(refEx, "偵測到並忽略一個 LDAP 轉介 (Referral)，繼續搜尋。轉介目標: {Referral}", refEx.Message);
+                                continue; // 繼續 while 迴圈的下一次迭代
+                            }
+                            catch (LdapException ex)
+                            {
+                                _logger.LogInformation(ex, "{MethodName} 偵測到一個無法處理的 LDAP 條目並已跳過。這通常是無害的系統物件。", nameof(GetAllUsersForAuditAsync));
+                                continue; // 忽略單一錯誤，繼續處理下一個
+                            }
                         }
                     }
                     _logger.LogInformation("成功從 AD 獲取 {UserCount} 位使用者。", users.Count);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "在 {MethodName} 中獲取 AD 使用者時發生錯誤。", nameof(GetAllUsersForAudit));
+                    _logger.LogError(ex, "在 {MethodName} 中獲取 AD 使用者時發生錯誤。", nameof(GetAllUsersForAuditAsync));
 
                     // 發生錯誤時回傳空列表
                     return new List<LdapUser>();
@@ -1084,73 +1100,69 @@ namespace API.Services.LDAP
         {
             _logger.LogInformation("開始執行 AD 帳號清查報表生成任務...");
 
-            // 使用 Task.Run 確保 LDAP 這個同步操作不會阻塞主執行緒
-            return await Task.Run(() =>
+            try
             {
-                try
-                {
-                    // 1. 獲取所有 AD 使用者
-                    var allUsers = GetAllUsersForAudit();
+                // 1. 獲取所有 AD 使用者
+                var allUsers = await GetAllUsersForAuditAsync();
 
-                    // 將設定檔中完整的 ExcludedGroups DN 列表，轉換為簡潔的 CN 名稱列表
-                    var simplifiedExcludedGroups = _adAuditConfig.ExcludedGroups
-                        .Select(dn => dn.Split(',')[0].Replace("CN=", ""))
-                        .ToList();
+                // 將設定檔中完整的 ExcludedGroups DN 列表，轉換為簡潔的 CN 名稱列表
+                var simplifiedExcludedGroups = _adAuditConfig.ExcludedGroups
+                    .Select(dn => dn.Split(',')[0].Replace("CN=", ""))
+                    .ToList();
 
-                    // 將 PrivilegedGroups 也進行簡化
-                    var simplifiedPrivilegedGroups = _adAuditConfig.PrivilegedGroups
-                        .Select(dn => dn.Split(',')[0].Replace("CN=", ""))
-                        .ToList();
+                // 將 PrivilegedGroups 也進行簡化
+                var simplifiedPrivilegedGroups = _adAuditConfig.PrivilegedGroups
+                    .Select(dn => dn.Split(',')[0].Replace("CN=", ""))
+                    .ToList();
 
-                    // 2. 執行篩選與轉換 (LINQ)
-                    var reportData = allUsers
-                        .Where(user =>
-                        {
-                            // 判斷條件一：使用者是否位於被排除的 OU 中
-                            // 使用者 DN (DistinguishedName) 若包含任何一個 ExcludedOUs 中的字串，則為 true
-                            bool isInExcludedOU = _adAuditConfig.ExcludedOUs
-                                .Any(ou => user.DistinguishedName.Contains(ou));
+                // 2. 執行篩選與轉換 (LINQ)
+                var reportData = allUsers
+                    .Where(user =>
+                    {
+                        // 判斷條件一：使用者是否位於被排除的 OU 中
+                        // 使用者 DN (DistinguishedName) 若包含任何一個 ExcludedOUs 中的字串，則為 true
+                        bool isInExcludedOU = _adAuditConfig.ExcludedOUs
+                            .Any(ou => user.DistinguishedName.Contains(ou));
 
-                            // 判斷條件二：使用者是否為被排除的群組成員
-                            // 使用者的 MemberOf 屬性與 ExcludedGroups 清單是否有任何交集
-                            bool isInExcludedGroup = user.MemberOf
-                                .Intersect(simplifiedExcludedGroups, StringComparer.OrdinalIgnoreCase)
-                                .Any();
+                        // 判斷條件二：使用者是否為被排除的群組成員
+                        // 使用者的 MemberOf 屬性與 ExcludedGroups 清單是否有任何交集
+                        bool isInExcludedGroup = user.MemberOf
+                            .Intersect(simplifiedExcludedGroups, StringComparer.OrdinalIgnoreCase)
+                            .Any();
 
-                            // 核心篩選邏輯：當使用者 "不" 在排除的OU 且 "不" 在排除的群組時，才回傳 true，代表應保留此使用者
-                            return !isInExcludedOU && !isInExcludedGroup;
-                        })
-                        .Select(user => new AdAuditReportItem
-                        {
-                            SamAccountName = user.SamAccountName,
-                            DisplayName = user.DisplayName,
-                            IsEnabled = user.IsActive == "Active",
+                        // 核心篩選邏輯：當使用者 "不" 在排除的OU 且 "不" 在排除的群組時，才回傳 true，代表應保留此使用者
+                        return !isInExcludedOU && !isInExcludedGroup;
+                    })
+                    .Select(user => new AdAuditReportItem
+                    {
+                        SamAccountName = user.SamAccountName,
+                        DisplayName = user.DisplayName,
+                        IsEnabled = user.IsActive == "Active",
 
-                            // 判斷特權帳號
-                            IsPrivileged =
-                                // 檢查 PrivilegedAccounts 列表是否有值？
-                                (_adAuditConfig.PrivilegedAccounts != null && _adAuditConfig.PrivilegedAccounts.Any())
+                        // 判斷特權帳號
+                        IsPrivileged =
+                            // 檢查 PrivilegedAccounts 列表是否有值？
+                            (_adAuditConfig.PrivilegedAccounts != null && _adAuditConfig.PrivilegedAccounts.Any())
 
-                                // IF TRUE: (有值) -> 則只使用個人列表進行判斷
-                                ? _adAuditConfig.PrivilegedAccounts.Contains(user.SamAccountName, StringComparer.OrdinalIgnoreCase)
+                            // IF TRUE: (有值) -> 則只使用個人列表進行判斷
+                            ? _adAuditConfig.PrivilegedAccounts.Contains(user.SamAccountName, StringComparer.OrdinalIgnoreCase)
 
-                                // ELSE: (為空) -> 則回退使用群組列表進行判斷
-                                : user.MemberOf.Intersect(simplifiedPrivilegedGroups, StringComparer.OrdinalIgnoreCase).Any()
-                        })
-                        .ToList();
+                            // ELSE: (為空) -> 則回退使用群組列表進行判斷
+                            : user.MemberOf.Intersect(simplifiedPrivilegedGroups, StringComparer.OrdinalIgnoreCase).Any()
+                    })
+                    .ToList();
 
-                    _logger.LogInformation("AD 帳號清查報表資料生成成功，共處理 {DataCount} 筆資料。", reportData.Count);
+                _logger.LogInformation("AD 帳號清查報表資料生成成功，共處理 {DataCount} 筆資料。", reportData.Count);
 
-                    return reportData;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "在 {MethodName} 中生成稽核報表資料時發生錯誤。", nameof(GenerateAuditReportDataAsync));
-                    
-                    // 發生錯誤時回傳空列表，避免 API 崩潰
-                    return Enumerable.Empty<AdAuditReportItem>();
-                }
-            });
+                return reportData;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "在 {MethodName} 中生成稽核報表資料時發生錯誤。", nameof(GenerateAuditReportDataAsync));
+
+                // 發生錯誤時回傳空列表，避免 API 崩潰
+                return Enumerable.Empty<AdAuditReportItem>();
+            }
         }
     }
 }

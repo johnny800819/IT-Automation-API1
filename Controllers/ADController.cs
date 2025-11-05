@@ -5,8 +5,6 @@ using API.DataModels.LDAP;
 using API.Services.FEB_CMS;
 using API.Services.LDAP;
 using Microsoft.AspNetCore.Mvc;
-using OfficeOpenXml;
-using OfficeOpenXml.Style;
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
 
@@ -300,12 +298,20 @@ namespace API.Controllers
         /// </summary>
         /// <param name="newUserModel">從請求主體 (Request Body) 傳入的 LdapUser 物件，包含新使用者的所有必要資訊。</param>
         /// <returns>一個包含建立作業詳細結果的 JSON 物件。</returns>
-        [ApiExplorerSettings(IgnoreApi = true)]
         [HttpPost("UserLdapCreate")]
         [ProducesResponseType(typeof(AdUserCreateResult), 200)] // 宣告成功時的回傳類型
         [ProducesResponseType(typeof(AdUserCreateResult), 400)] // 宣告失敗時的回傳類型
         public async Task<IActionResult> CreateLdapUser([FromBody] LdapUser newUserModel)
         {
+            await Task.Yield(); // 消除警告
+            return StatusCode(503, new SimpleApiResponse
+            {
+                IsSuccess = false,
+                Message = "此功能目前暫時關閉或服務不可用，請稍後再試。"
+            });
+
+            #if false
+
             if (newUserModel == null)
             {
                 return BadRequest(new AdUserCreateResult { IsSuccess = false, Message = "請求主體不得為空。" });
@@ -332,6 +338,8 @@ namespace API.Controllers
                 _logger.LogError(ex, "呼叫 CreateLdapUser 時發生未預期的錯誤。");
                 return StatusCode(500, new AdUserCreateResult { IsSuccess = false, Message = $"伺服器內部發生未預期的錯誤: {ex.Message}" });
             }
+
+            #endif
         }
 
         /// <summary>
@@ -349,6 +357,15 @@ namespace API.Controllers
         [ProducesResponseType(typeof(SimpleApiResponse), 404)] // 如果路由中的 username 找不到 (雖然我們的邏輯會在 400 回傳)
         public async Task<IActionResult> UpdateLdapUser(string username, [FromBody] AdUserUpdateModel updateData)
         {
+            await Task.Yield(); // 消除警告
+            return StatusCode(503, new SimpleApiResponse
+            {
+                IsSuccess = false,
+                Message = "此功能目前暫時關閉或服務不可用，請稍後再試。"
+            });
+
+            #if false
+
             if (updateData == null)
             {
                 return BadRequest(new SimpleApiResponse { IsSuccess = false, Message = "請求主體不得為空。" });
@@ -375,6 +392,8 @@ namespace API.Controllers
                 _logger.LogError(ex, "執行 UpdateLdapUser 時發生未預期的錯誤。 Username: {Username}", username);
                 return StatusCode(500, new SimpleApiResponse { IsSuccess = false, Message = $"伺服器內部發生未預期的錯誤: {ex.Message}" });
             }
+
+            #endif
         }
 
         /// <summary>

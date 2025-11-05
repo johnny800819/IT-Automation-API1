@@ -23,13 +23,14 @@ namespace API.Services.Veeam
         /// <inheritdoc/>
         public async Task<List<VeeamBackupSessions>> GetBackupSessionsAsync()
         {
-            _logger.LogInformation("開始從資料庫獲取 Veeam 備份工作階段資料...");
+            _logger.LogInformation("開始從資料庫獲取 Veeam 備份工作階段資料(取前 1000 筆)...");
             try
             {
                 // 從 _context 讀取資料，並進行排序 (改為非同步的 ToListAsync() 以提升效能)
                 var sessions = await _misContext.VeeamBackupSessions
                     .OrderByDescending(s => s.UpdateTime)
                     .ThenBy(s => s.VmsSessionName)
+                    .Take(1000)
                     .ToListAsync();
 
                 _logger.LogInformation("成功獲取了 {Count} 筆 Veeam 備份工作階段資料。", sessions.Count);
