@@ -7,9 +7,11 @@ using API.Services.FEB_CMS;
 using API.Services.LDAP;
 using API.Services.Veeam;
 using API.Services.VMware;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using NLog;
 using NLog.Web;
+using System.Text;
 
 // Early init of NLog to allow startup and exception logging, before host is built
 var logger = NLog.LogManager.Setup().LoadConfigurationFromAppSettings().GetCurrentClassLogger();
@@ -19,6 +21,57 @@ try
 {
     //**************** Add services to the container. ****************
     var builder = WebApplication.CreateBuilder(args);
+
+    //=========================
+    // 註冊 Windows DPAPI 資料保護服務
+    builder.Services.AddDataProtection().ProtectKeysWithDpapi();
+
+    // 設定檔載入邏輯
+    if (builder.Environment.IsDevelopment())
+    {
+        // 1. 開發環境：
+        //    我們直接讀取明碼的 secrets.dev.json
+        logger.Debug("偵測到「開發」環境，正在載入 secrets.dev.json (明碼)");
+        builder.Configuration.AddJsonFile("secrets.dev.json", optional: true, reloadOnChange: true);
+    }
+    else
+    {
+        // 2. 正式環境 (或非開發環境)：
+        //    我們嘗試讀取並解密 secrets.prod.enc
+        logger.Debug("偵測到「正式」環境，正在載入 secrets.prod.enc (加密檔)");
+        const string encryptedSecretsFile = "secrets.prod.enc";
+        if (File.Exists(encryptedSecretsFile))
+        {
+            try
+            {
+                // 1. 讀取「加密」檔案 (Base64 字串)
+                string encryptedBase64 = File.ReadAllText(encryptedSecretsFile);
+
+                // 2. 呼叫函式庫的「解密」功能
+                //    (注意：我們使用「完全限定名稱」來避免名稱衝突)
+                string decryptedJson = Utils.DpapiProvider.DpapiProvider.Decrypt(encryptedBase64);
+
+                // 3. 將解密的 JSON 字串載入到 .NET 組態中
+                using (var stream = new MemoryStream(Encoding.UTF8.GetBytes(decryptedJson)))
+                {
+                    builder.Configuration.AddJsonStream(stream);
+                }
+
+                logger.Info("已成功載入並解密 secrets.prod.enc");
+            }
+            catch (Exception ex)
+            {
+                // 解密失敗，這很嚴重，程式應該停止啟動
+                logger.Error(ex, "解密 secrets.prod.enc 失敗！");
+                throw;
+            }
+        }
+        else
+        {
+            logger.Warn($"找不到正式環境的加密設定檔: {encryptedSecretsFile}");
+        }
+    }
+    //=========================
 
     // 將 資料庫Context 加入服務容器中，以便在應用程式中進行依賴注入 (程式要使用建構子Constructure才能真正注入)
     builder.Services.AddDbContext<MISContext>(options =>

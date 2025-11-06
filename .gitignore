@@ -5,11 +5,16 @@
 
 #=============自定義=============
 
-#資訊安全-敏感資料檔案
+# 資訊安全-敏感資料檔案
 appsettings.json
+appsettings.Production.json
+secrets.xml
+secrets.dev.json
+secrets.prod.enc
 
 # 忽略專案文件紀錄
 相關文件紀錄/
+批次檔/
 
 #===============================
 
