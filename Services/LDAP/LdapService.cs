@@ -1,8 +1,9 @@
-﻿using API.Classes;
+using API.Classes;
 using API.Classes.LDAP;
 using API.DataModels;
 using API.DataModels.LDAP;
-using API.Models;
+using API.Models.MIS;
+using API.Models.FEB_CMS;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Novell.Directory.Ldap;
@@ -1153,6 +1154,24 @@ namespace API.Services.LDAP
                     .ToList();
 
                 _logger.LogInformation("AD 帳號清查報表資料生成成功，共處理 {DataCount} 筆資料。", reportData.Count);
+
+                // --- 新增稽核快照存檔邏輯 ---
+                var auditHistoryEntries = reportData.Select(item => new AuditAdAccountHistory
+                {
+                    Environment = "Prod",
+                    Account = item.SamAccountName,
+                    Name = item.DisplayName ?? "",
+                    IsPrivileged = item.IsPrivileged,
+                    Status = item.IsEnabled ? "啟用" : "停用",
+                    ProposedAction = "保留", 
+                    AuditDate = DateTime.Now
+                }).ToList();
+
+                if (auditHistoryEntries.Any())
+                {
+                    await _misContext.AuditAdAccountHistory.AddRangeAsync(auditHistoryEntries);
+                    await _misContext.SaveChangesAsync();
+                }
 
                 return reportData;
             }

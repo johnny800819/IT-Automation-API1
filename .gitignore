@@ -12,9 +12,10 @@ secrets.xml
 secrets.dev.json
 secrets.prod.enc
 
-# 忽略專案文件紀錄
+# 忽略專案文件紀錄與工具
 相關文件紀錄/
 批次檔/
+backups/
 
 #===============================
 

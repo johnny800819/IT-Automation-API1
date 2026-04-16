@@ -4,7 +4,7 @@ using API.Models.FEB_CMS;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 
-namespace API.Models
+namespace API.Models.FEB_CMS
 {
     public partial class FEB_CMSContext : DbContext
     {

@@ -1,8 +1,25 @@
 # IT 自動化 API (IT-Automation-API1)
 
-這是一個 .NET 8 Web API 專案，作為 IT 自動化任務的後端服務中心。它提供了一套 RESTful API 端點，用於管理和查詢內部的 IT 基礎設施，包括 Active Directory、VMware vCenter 和 Veeam 備份。
+這是一個 .NET 8 Web API 專案，作為 IT 自動化任務的後端服務中心。提供一套 RESTful API 端點，涵蓋 Active Directory、VMware vCenter、Veeam 備份，以及 VM / AD / DB / 應用系統四大帳號稽核功能。
 
-此專案採用了客製化的 DPAPI 組態架構，以確保「正式環境」的 secrets（如資料庫連線字串、服務帳號密碼）**不會**以明碼形式出現。
+此專案採用系統環境變數配置架構，以確保「正式環境」的機密（如資料庫連線字串、服務帳號密碼）遵循雲端原生安全標準進行管理。
+
+> 🤖 **AI 輔助開發參考指引**
+>
+> 若您是 AI 助手（如 Copilot、Antigravity 等）正在協助開發本專案，
+> 除了閱讀本 README 外，**務必同時參考 `相關文件紀錄/` 目錄下的補充文件**，
+> 以獲得更完整的專案脈絡：
+>
+> | 文件 | 用途 |
+> |------|------|
+> | `專案 API 架構 (文字模式).txt` | 完整的檔案架構圖、API 端點一覽、歷次重構與功能強化紀錄 |
+> | `Scaffold Record 操作方法.txt` | EF Core Database-First 的 Scaffold 指令與注意事項 |
+> | `設定系統全域環境變數.txt` | 正式環境部署時的環境變數設定 SOP |
+> | `正式伺服器部署標準作業流程 (SOP).docx` | 完整的 IIS 部署流程 |
+> | `Template/` | 報表範本 Excel 檔案，供美化輸出時參考 |
+>
+> 這些文件包含了程式碼以外的設計決策、部署慣例與歷史記錄，
+> 能幫助您做出更符合專案規範的建議。
 
 ## 目錄
 
@@ -10,12 +27,12 @@
 - [核心功能](#核心功能)
 - [技術棧](#技術棧)
 - [安裝與設定](#安裝與設定)
-- [安全組態設定 (DPAPI 方案)](#安全組態設定-dpapi-方案)
+- [安全組態設定 (環境變數方案)](#安全組態設定-環境變數方案)
 - [API 端點](#api-端點)
 - [開發指南](#開發指南)
 - [部署](#部署)
 - [故障排除](#故障排除)
-- [相關專案](#相關專案)
+- [授權](#授權)
 
 ## 專案架構
 
@@ -23,108 +40,8 @@
 
 * .NET 8.0 Web API 專案 (`net8.0-windows`)
 * 負責處理所有 HTTP 請求、日誌記錄 (NLog) 和依賴注入 (DI)
-* 啟動時 (`Program.cs`) 判斷環境，並動態載入「明碼」或「加密」設定檔
-* 使用 Windows DPAPI 進行正式環境的設定檔加解密
-
-### 輔助工具（需自行建立）
-
-> ⚠️ **注意：** 基於資安考量，DPAPI 加解密相關的輔助工具**未包含在此**。
-> 
-> 此專案使用 Windows DPAPI 來保護正式環境的機密設定。您需要自行建立以下兩個輔助專案（或使用替代方案）：
-
-#### 1. DPAPI 加解密函式庫
-
-**用途：** 提供 DPAPI 加密和解密功能的可重用類別庫
-
-**建立方式：**
-```bash
-# 建立類別庫專案
-dotnet new classlib -n Utils.DpapiProvider -f net8.0-windows
-cd Utils.DpapiProvider
-
-# 安裝必要套件
-dotnet add package System.Security.Cryptography.ProtectedData
-```
-
-**核心程式碼範例：**
-```csharp
-using System.Security.Cryptography;
-using System.Text;
-
-namespace Utils.DpapiProvider
-{
-    public static class DpapiProvider
-    {
-        // 加密字串
-        public static string Encrypt(string plainText)
-        {
-            byte[] plainBytes = Encoding.UTF8.GetBytes(plainText);
-            byte[] encryptedBytes = ProtectedData.Protect(
-                plainBytes,
-                null,
-                DataProtectionScope.LocalMachine
-            );
-            return Convert.ToBase64String(encryptedBytes);
-        }
-
-        // 解密字串
-        public static string Decrypt(string encryptedText)
-        {
-            byte[] encryptedBytes = Convert.FromBase64String(encryptedText);
-            byte[] plainBytes = ProtectedData.Unprotect(
-                encryptedBytes,
-                null,
-                DataProtectionScope.LocalMachine
-            );
-            return Encoding.UTF8.GetString(plainBytes);
-        }
-    }
-}
-```
-
-#### 2. 設定檔加密工具
-
-**用途：** 將明碼的 JSON 設定檔加密成 `secrets.prod.enc`
-
-**建立方式：**
-```bash
-# 建立主控台應用程式
-dotnet new console -n Utils.EncryptTool -f net8.0-windows
-cd Utils.EncryptTool
-
-# 參考 Utils.DpapiProvider 專案
-dotnet add reference ../Utils.DpapiProvider/Utils.DpapiProvider.csproj
-```
-
-**核心程式碼範例：**
-```csharp
-using Utils.DpapiProvider;
-
-string inputFile = "secrets.dev.json";
-string outputFile = "secrets.prod.enc";
-
-if (!File.Exists(inputFile))
-{
-    Console.WriteLine($"找不到輸入檔案: {inputFile}");
-    return;
-}
-
-string plainJson = File.ReadAllText(inputFile);
-string encrypted = DpapiProvider.Encrypt(plainJson);
-File.WriteAllText(outputFile, encrypted);
-
-Console.WriteLine($"加密完成！已產生: {outputFile}");
-```
-
-#### 替代方案
-
-如果您不想使用 DPAPI，可以考慮：
-1. **Azure Key Vault** - 雲端金鑰管理服務
-2. **User Secrets** - .NET 內建的開發環境 secrets 管理（僅適用於開發環境）
-3. **環境變數** - 直接從系統環境變數讀取敏感設定
-4. **Docker Secrets** - 容器化環境的 secrets 管理
-
-若使用替代方案，您需要修改 `Program.cs` 中的設定載入邏輯。
+* 啟動時 (`Program.cs`) 判斷環境，並動態載入設定檔或環境變數
+* 使用系統環境變數進行正式環境的機密設定管理
 
 ## 核心功能
 
@@ -137,6 +54,14 @@ Console.WriteLine($"加密完成！已產生: {outputFile}");
 * **使用者管理：** 建立 (`CreateLdapUserAsync`) 和更新 (`UpdateLdapUserAsync`) AD 使用者（未正式啟用）
 * **FEB CMS 整合：** 自動同步 AD 使用者狀態（離職/職稱）至 `FEB_CMS` 資料庫 (`SyncUsersFromAdAsync`)
 
+### 帳號清查服務 (`AccountAuditController`) — 四大稽核功能
+
+* **VM 本機帳號稽核：** 觸發 PowerShell 腳本透過 vCenter 盤點各 VM 的本機帳號，以 Upsert 邏輯同步至 `AuditVmAccountHistory`，支援軟刪除與手動維護主機（`IsManual`）豁免
+* **AD 帳號稽核：** 透過 LDAP 取得 AD 帳號，匯出含特權帳號標記、名稱空白帳號分頁的 Excel 稽核報表
+* **DB 帳號稽核：** 執行 SQL 腳本盤點指定 SQL Server 的登入帳號，自動帶入承辦人（`Assignee`）與說明，支援人工記錄保護欄位不被覆蓋
+* **應用系統帳號稽核：** 採**組態驅動**設計，透過 `appsettings.json` 定義各應用系統的連線字串與 SQL 查詢，無需改程式碼即可新增系統。目前支援 `FEB_CMS`，報表格式為「組室、帳號、姓名、清查結果」。
+* **稽核決策更新（骨架）：** 提供 PATCH 端點預備接收未來稽核管理 UI 的決策寫入（`ActionDecision`），目前暫不對外公開
+
 ### VMware 服務 (`VMwareController`)
 
 * **虛擬機查詢：** 透過 vCenter API 獲取指定環境（正式/測試）的虛擬機 (VM) 列表及其電源狀態 (`GetVmsAsync`)
@@ -148,7 +73,7 @@ Console.WriteLine($"加密完成！已產生: {outputFile}");
 ### 通用服務 (`Classes/`)
 
 * **郵件服務 (`MailSend`)：** 透過 SMTP (Mail Relay) 發送郵件
-* **Excel 服務 (`ExcelService`)：** 使用 EPPlus.Free 產生 Excel 報表
+* **Excel 服務 (`ExcelService`)：** 使用 EPPlus.Free 產生 Excel 報表，統一 VM / AD / DB 三份報表的視覺風格（標楷體、大標題、狀態色彩標記）
 
 ## 技術棧
 
@@ -161,12 +86,8 @@ Console.WriteLine($"加密完成！已產生: {outputFile}");
 * **日誌記錄：** NLog 6.0
 * **文件產生：** EPPlus.Free (Excel)
 * **郵件服務：** NETCore.MailKit、MimeKit
-* **安全性：** Windows DPAPI (Data Protection API)
 * **API 文件：** Swagger/OpenAPI (Swashbuckle.AspNetCore)
 * **虛擬化管理：** VMware vCenter REST API
-* **其他套件：** 
-  - Microsoft.Build
-  - System.Drawing.Common
 
 ## 安裝與設定
 
@@ -196,7 +117,7 @@ dotnet restore
    - VMware vCenter 設定和憑證
    - SMTP 郵件伺服器設定
 
-> ⚠️ **重要：** `secrets.dev.json` 以及 `appsettings.Development_參考.json`，請改成**正確**的名稱。
+> ⚠️ **重要：** `secrets.dev.json` 是本機開發專用的明碼檔案，已加入 `.gitignore`。
 
 ### 4. 資料庫遷移（如需要）
 
@@ -220,82 +141,87 @@ dotnet run
 https://localhost:5001/swagger
 ```
 
-## 安全組態設定 (DPAPI 方案)
+## 安全組態設定 (環境變數方案)
 
-本專案**不使用**標準的 `appsettings.json` 來儲存 secrets。所有組態（包含連線字串、LDAP 密碼、VMware 密碼等）都透過環境判斷來載入：
+本專案不再使用加密檔案 (DPAPI)，而是將敏感機密（密碼、連線字串）透過環境變數進行隔離管理：
 
 ### 1. 開發環境 (Development)
 
 * **觸發方式：** `ASPNETCORE_ENVIRONMENT` 環境變數**未設定**或設定為 `Development`
 * **載入檔案：** `secrets.dev.json` (明碼)
 * **安全性：** 此檔案被 `.gitignore` 忽略，**永遠不會**被 Commit
-* **用途：** 僅供本機開發使用
 
 ### 2. 正式環境 (Production)
 
-* **觸發方式：** `ASPNETCORE_ENVIRONMENT` 環境變數設定為 `Production`
-* **載入檔案：** `secrets.prod.enc` (使用 DPAPI `LocalMachine` 加密)
-* **載入邏輯：** 
-  1. `Program.cs` 在啟動時讀取 `secrets.prod.enc` 檔案
-  2. 呼叫 `Utils.DpapiProvider.Decrypt()` 在記憶體中解密
-  3. 將解密後的 JSON 載入為應用程式組態
-* **安全性：** 
-  - 加密檔案使用 Windows DPAPI LocalMachine 範圍加密
-  - 僅能在加密的同一台機器上解密
-  - Secrets 永不以明碼存在於磁碟
+* **觸發方式：** 需將機器的 `ASPNETCORE_ENVIRONMENT` 環境變數設定為 `Production`。
+* **變數存放位置 (設定點)：** 
+  - 本專案統一依賴 Windows 的 **系統環境變數 (Machine-level System Environment Variables)**。
+  - 您可以透過 GUI 檢視：`控制台` -> `系統及安全性` -> `系統` -> `進階系統設定` -> `環境變數` -> 下方的 **「系統變數」** 區塊。
+  - **重要**：設定或更新此區塊的變數後，IIS 通常需要重新啟動 (`net stop was /y & net start w3svc`) 才能載入最新的環境變數。
+* **優點：** 遵循雲端部署的 12-Factor App 標準，密碼與機密設定 (secrets) 不落地儲存於專案的任何實體檔案中。
+* **管理工具：** 為了避免手動新增變數容易出錯，我們推薦使用內附的 `批次檔/Set-EnvVariables.ps1` 進行自動化注入。該腳本會使用 PowerShell API 直接將您設定的參數寫入 Windows 的「系統變數」中，包含 `ASPNETCORE_ENVIRONMENT`。
 
-### 3. 產生正式環境加密檔
+> ⚠️ **【重要】PowerShell 中文亂碼問題（UTF-8 BOM）**
+>
+> `Set-EnvVariables.ps1` 必須以 **UTF-8 with BOM** 格式儲存，PowerShell 5.1（Windows Server 環境）才能正確顯示中文。
+>
+> **每次使用 AI 工具重新生成或覆寫此 `.ps1` 檔案後，都必須重新執行以下 BOM 轉換指令**，  
+> 因為 AI 工具預設儲存的是 UTF-8 without BOM：
+>
+> ```powershell
+> $f = "批次檔\Set-EnvVariables.ps1" # 調整為實際路徑
+> [System.IO.File]::WriteAllText($f, (Get-Content $f -Raw -Encoding UTF8), (New-Object System.Text.UTF8Encoding $true))
+> ```
+>
+> 腳本本身也已內建 `chcp 65001` 與 `[Console]::OutputEncoding = UTF8` 雙重保護，但檔案本身的 BOM 仍需手動確認。
 
-如果您已建立 `Utils.EncryptTool` 工具（請參考[專案架構](#專案架構)章節），可以使用它來產生加密檔：
+### 3. 環境變數命名規則
 
-**步驟：**
-
-1. 準備明碼設定檔 `secrets.dev.json`（根據 `appsettings.json` 填入實際設定）
-
-2. 在正式環境的伺服器上執行加密工具：
-   ```bash
-   cd Utils.EncryptTool
-   dotnet run
-   ```
-
-3. 工具會讀取 `secrets.dev.json` 並產生 `secrets.prod.enc`
-
-4. 將 `secrets.prod.enc` 複製到 API 專案的根目錄
-
-**重要提醒：**
-- ⚠️ 加密檔必須在**正式環境的伺服器上**產生（因為 DPAPI LocalMachine 綁定特定機器）
-- ⚠️ 如果更換伺服器，需要重新產生加密檔
-
-**手動替代方案：**
-
-如果不想建立加密工具，您也可以：
-1. 使用環境變數來設定所有敏感資訊
-2. 修改 `Program.cs`，移除 DPAPI 相關程式碼，改用其他設定來源
-3. 在正式環境直接使用明碼的 `appsettings.Production.json`（**不建議**，安全性較低）
+當您需要將 `secrets.dev.json` 裡的巢狀結構轉為環境變數時，請使用 **雙底線 `__`** 代替冒號。
+例如：`ConnectionStrings:MISContext` 應設定為 `ConnectionStrings__MISContext`。
 
 ## API 端點
 
-### Active Directory (AD) 端點
+### Active Directory (AD) 端點 (`/AD/`)
+
+> ⚠️ **注意：** ADController 的路由前綴為 `/AD/`（沒有 `/api/` 前綴），與其他 Controller 不同。
 
 | 方法 | 端點 | 說明 |
 |------|------|------|
-| POST | `/api/AD/authenticate` | 驗證 LDAP 使用者帳號密碼 |
-| POST | `/api/AD/check-password-expiry` | 檢查密碼到期狀態並發送通知 |
-| POST | `/api/AD/sync-users` | 同步 AD 使用者至資料庫 |
-| GET  | `/api/AD/audit-report` | 產生 AD 稽核報表 (Excel) |
-| POST | `/api/AD/sync-to-febcms` | 同步使用者狀態至 FEB CMS |
+| GET  | `/AD/UserLdapAuth` | 驗證 LDAP 使用者帳號密碼 (傳入帳號密碼) |
+| GET  | `/AD/LdapAuth` | 驗證 LDAP 使用者帳號密碼 |
+| GET  | `/AD/LdapSSLAuth` | 驗證 LDAP 使用者帳號密碼 (透過 SSL) |
+| GET  | `/AD/UserPwdLastSetCheck` | 檢查所有 AD 帳號密碼到期狀態並發送通知 |
+| GET  | `/AD/UserPwdLastSetCheckOne` | 檢查【單一】AD 帳號密碼到期狀態並發送通知 |
+| GET  | `/AD/CheckFebCmsUserFromAD` | 產生離職及非約聘僱員工清單 (與 FEB CMS 關聯) |
+| GET  | `/AD/SyncAdUsersToDatabase` | 同步 AD 使用者歷史紀錄至資料庫 |
+| GET  | `/AD/GetAdUserInfoHTML` | 取得 AD 使用者清單 (HTML 頁面格式) |
+| GET  | `/AD/AdAuditReport` | 產生並下載 AD 帳號稽核報表 (Excel 格式) |
+| POST | `/AD/UserLdapCreate` | 建立新的 AD 使用者 (預設未啟用) |
+| PUT  | `/AD/UserLdapEdit/{username}` | 更新 AD 使用者資料 (預設未啟用) |
 
-### VMware 端點
+### 帳號清查端點 (`/api/AccountAudit/`)
 
 | 方法 | 端點 | 說明 |
 |------|------|------|
-| GET  | `/api/VMware/vms` | 取得虛擬機列表及狀態 |
+| GET   | `/api/AccountAudit/Database/Export` | 一次掃描全部 DB 伺服器 (225、226、206)，產出含三個獨立頁籤的 Excel 報表 |
+| GET   | `/api/AccountAudit/VM/Export` | 觸發 PowerShell 掃描 VM 本機帳號並下載 Excel 報表 |
+| GET   | `/api/AccountAudit/AD/Export` | 掃描 AD 帳號並下載 Excel 報表 |
+| GET   | `/api/AccountAudit/App/{systemKey}/Export` | 掃描指定應用系統帳號並下載 Excel 報表；`systemKey` 對應 `appsettings.json` 的 `AppAuditSettings`，目前支援 `FEB_CMS` |
+| PATCH | `/api/AccountAudit/db/{id}/decision` | ⚙️ 更新 DB 帳號的稽核決策（ActionDecision）與承辦人（Assignee），待搭配管理 UI 後正式啟用 |
 
-### Veeam 端點
+### VMware 端點 (`/api/VMware/`)
 
 | 方法 | 端點 | 說明 |
 |------|------|------|
-| GET  | `/api/Veeam/backup-sessions` | 取得備份工作階段日誌 |
+| GET  | `/api/VMware/GetVMsList` | 取得 VMware 虛擬機狀態報表 (帶入參數 ?val=1 或 2) |
+
+### Veeam 端點 (`/api/Veeam/`)
+
+| 方法 | 端點 | 說明 |
+|------|------|------|
+| GET  | `/api/Veeam/GetVeeamBackupSessions` | 取得 Veeam 備份工作階段結果 |
+| GET  | `/api/Veeam/GetVeeamBackupSessionsHTML` | 取得 Veeam 備份工作階段結果 (HTML 格式) |
 
 > 📖 **完整的 API 文件請參考 Swagger UI：** `https://localhost:5001/swagger`
 
@@ -305,25 +231,48 @@ https://localhost:5001/swagger
 
 ```
 API/
-├── Classes/              # 共用類別（郵件、Excel、LDAP 等）
-├── Controllers/          # API 控制器
+├── Classes/                    # 共用類別（郵件、Excel、LDAP 等）
+│   ├── LDAP/                   # LDAP 設定模型與擴充方法
+│   ├── Reporting/              # Excel 報表服務 (ExcelService.cs)
+│   └── VMware/                 # VMware 設定模型
+├── Controllers/                # API 控制器
+│   ├── AccountAuditController.cs  # 帳號清查統一入口 (VM/AD/DB/App)
 │   ├── ADController.cs
 │   ├── VMwareController.cs
 │   ├── VeeamController.cs
 │   └── WMIController.cs
-├── DataModels/           # 資料庫 Entity Framework 模型
-├── Models/               # 設定模型和 DTO
-├── Services/             # 業務邏輯服務層
+├── DataModels/                 # DTOs & ViewModels
+├── Models/                     # Entity Framework 資料庫實體
+│   ├── AppAudit/               # 應用系統稽核設定強型別模型
+│   │   └── AppAuditSettings.cs # 對應 appsettings.json -> AppAuditSettings
+│   ├── FEB_CMS/                # FEB_CMS 資料庫實體
+│   └── MIS/                    # MIS 資料庫實體 (稽核 Models)
+│       ├── AuditAdAccountHistory.cs   # AD 帳號清查歷史
+│       ├── AuditAppAccountHistory.cs  # 應用系統帳號清查歷史
+│       ├── AuditDbAccountHistory.cs   # DB 帳號清查歷史
+│       ├── AuditVmAccountHistory.cs   # VM 本機帳號清查歷史
+│       └── MISContext.cs
+├── 批次檔/                     # 自動化腳本與環境變數工具
+│   ├── Audit_VM_LocalAccounts_API.ps1 # VM 本機帳號清查 (API 呼叫版)
+│   └── Set-EnvVariables.ps1           # 正式環境變數注入腳本
+├── Services/                   # 核心業務邏輯層
+│   ├── AppAudit/               # 應用系統帳號清查服務
+│   │   ├── IAppAuditService.cs # 服務介面（組態驅動設計）
+│   │   └── AppAuditService.cs  # 服務實作（ADO.NET 直連 + Upsert）
+│   ├── Database/               # DB 帳號清查服務
 │   ├── FEB_CMS/
-│   ├── LDAP/
+│   ├── LDAP/                   # AD/LDAP 服務
 │   ├── Veeam/
-│   └── VMware/
-├── Logs/                 # NLog 日誌輸出目錄
-├── Program.cs            # 應用程式進入點
-├── nlog.config           # NLog 設定檔
-├── appsettings.json      # 基本設定（不含 secrets）
-└── secrets.dev.json      # 開發環境 secrets
+│   └── VMware/                 # VM 查詢 + VM 帳號清查服務
+│       ├── VmAuditService.cs   # PowerShell 執行與 Upsert 邏輯
+│       └── VMwareService.cs
+├── Logs/                       # NLog 日誌輸出目錄
+├── Program.cs                  # 應用程式進入點
+├── nlog.config                 # NLog 設定檔
+├── appsettings.json            # 所有功能設定（含 AppAuditSettings）
+└── secrets.dev.json            # 開發環境機密（不納入版控）
 ```
+
 
 ### 依賴注入 (DI)
 
@@ -338,7 +287,7 @@ builder.Services.AddScoped<IMailSend, MailSend>();
 
 ### 日誌記錄
 
-使用 NLog 進行日誌記錄，設定檔位於 `nlog.config`：
+使用 NLog 進行日誌記錄，設定檔位於 `nlog.config`。日誌將輸出至 `Logs/` 目錄，並按日期滾動。
 
 ### 新增 API 端點
 
@@ -357,19 +306,14 @@ builder.Services.AddScoped<IMailSend, MailSend>();
    ```
 
 2. **設定環境變數：**
-   - 在 IIS 應用程式集區或系統環境變數中設定：
-     ```
-     ASPNETCORE_ENVIRONMENT=Production
-     ```
+   - 以管理員身分執行 `批次檔/Set-EnvVariables.ps1`。
+   - 依照腳本提示輸入各項正式機參數。
+   - 此動作會自動設定 `ASPNETCORE_ENVIRONMENT=Production` 以及所需的連線字串。
 
-3. **準備加密設定檔：**
-   - 在正式伺服器上執行 `Utils.EncryptTool` 產生 `secrets.prod.enc`
-   - 將 `secrets.prod.enc` 放置於發佈目錄
-
-4. **設定 IIS：**
-   - 安裝 .NET 8.0 Hosting Bundle
-   - 建立應用程式集區（無受控碼）
-   - 建立網站並指向發佈目錄
+3. **設定 IIS：**
+   - 安裝 .NET 8.0 Hosting Bundle。
+   - 建立網站並指向發佈目錄。
+   - **重要：** 設定或更新環境變數後，必須重新啟動 IIS 應用程式集區 (Recycle App Pool) 才能讓應用程式偵測到新值。
 
 ### Windows 服務部署
 
@@ -379,46 +323,37 @@ builder.Services.AddScoped<IMailSend, MailSend>();
 
 ### 常見問題
 
-#### 1. 無法載入 secrets.prod.enc
+#### 1. 環境變數未生效 (正式環境)
 
-**錯誤訊息：** `找不到正式環境的加密設定檔`
-
-**解決方案：**
-- 確認 `secrets.prod.enc` 檔案存在於執行目錄
-- 確認 `ASPNETCORE_ENVIRONMENT` 環境變數設定正確
-
-#### 2. 解密失敗
-
-**錯誤訊息：** `解密 secrets.prod.enc 失敗！`
+**錯誤訊息：** `ArgumentNullException: Value cannot be null. (Parameter 'connectionString')`
 
 **解決方案：**
-- 確認加密檔案是在同一台機器上產生的（DPAPI LocalMachine 限制）
-- 如果更換伺服器，需要重新產生加密檔案
+- 確認您已執行 `批次檔/Set-EnvVariables.ps1`。
+- 檢查 Windows 系統進階設定中的環境變數是否已包含 `ConnectionStrings__MISContext` 等項目。
+- **必須重新啟動 IIS 應用程式集區**。
 
-#### 3. LDAP 連線失敗
+#### 2. LDAP 連線失敗
 
 **錯誤訊息：** `LDAP 伺服器連線逾時`
 
 **解決方案：**
 - 檢查網路連線和防火牆設定
-- 確認 LDAP 伺服器位址和連接埠正確
-- 驗證服務帳號憑證是否有效
+- 確認 LDAP 伺服器位址 (Host) 正確
+- 驗證服務帳號 (AdminBaseDC) 的憑證是否有效
 
-#### 4. 資料庫連線失敗
+#### 3. 資料庫連線失敗
 
 **錯誤訊息：** `無法連線至 SQL Server`
 
 **解決方案：**
-- 檢查連線字串格式
-- 確認 SQL Server 服務正在執行
-- 驗證資料庫使用者權限
+- 檢查環境變數中的連線字串格式是否正確。
+- 確認 SQL Server 服務正在執行，且防火牆允許連線。
 
-#### 5. NLog 日誌未產生
+#### 4. NLog 日誌未產生
 
 **解決方案：**
-- 確認 `Logs/` 目錄存在且有寫入權限
-- 檢查 `nlog.config` 設定是否正確
-- 確認應用程式有檔案系統寫入權限
+- 確認 `Logs/` 目錄存在且 IIS 帳號 (如 `IIS AppPool\YourPoolName`) 有寫入權限。
+- 檢查 `nlog.config` 設定是否正確。
 
 ### 日誌位置
 
@@ -426,30 +361,6 @@ builder.Services.AddScoped<IMailSend, MailSend>();
 * **IIS 日誌：** `C:\inetpub\logs\LogFiles\`
 * **Windows 事件檢視器：** 應用程式日誌
 
-## 附錄：DPAPI 加密方案說明
-
-### 為什麼使用 DPAPI？
-
-**Windows Data Protection API (DPAPI)** 是 Windows 內建的加密 API，具有以下優點：
-
-* ✅ **無需管理金鑰：** 由作業系統自動管理加密金鑰
-* ✅ **機器綁定：** 使用 `LocalMachine` 範圍時，只能在加密的同一台機器上解密
-* ✅ **免費且內建：** 不需額外安裝或訂閱服務
-* ✅ **簡單易用：** 程式碼實作簡單
-
-### 限制與注意事項
-
-* ⚠️ **僅限 Windows：** 無法在 Linux 或 macOS 上使用
-* ⚠️ **機器綁定：** 更換伺服器時必須重新加密設定檔
-* ⚠️ **無法版本控制：** 加密檔無法提交到 Git（不同機器無法解密）
-
-### 相關資源
-
-* [Microsoft Docs: Data Protection API](https://docs.microsoft.com/zh-tw/dotnet/standard/security/how-to-use-data-protection)
-* [System.Security.Cryptography.ProtectedData](https://docs.microsoft.com/zh-tw/dotnet/api/system.security.cryptography.protecteddata)
-
 ## 授權
 
 內部專案，不提供使用。
-
----

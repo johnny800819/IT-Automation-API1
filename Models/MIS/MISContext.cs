@@ -1,9 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 
-namespace API.Models
+namespace API.Models.MIS
 {
     public partial class MISContext : DbContext
     {
@@ -20,6 +20,11 @@ namespace API.Models
         public virtual DbSet<LdapUserInfo> LdapUserInfo { get; set; }
         public virtual DbSet<LdapUserRole> LdapUserRole { get; set; }
         public virtual DbSet<VeeamBackupSessions> VeeamBackupSessions { get; set; }
+
+        public virtual DbSet<AuditAdAccountHistory> AuditAdAccountHistory { get; set; }
+        public virtual DbSet<AuditDbAccountHistory> AuditDbAccountHistory { get; set; }
+        public virtual DbSet<AuditVmAccountHistory> AuditVmAccountHistory { get; set; }
+        public virtual DbSet<AuditAppAccountHistory> AuditAppAccountHistory { get; set; }
 
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         {

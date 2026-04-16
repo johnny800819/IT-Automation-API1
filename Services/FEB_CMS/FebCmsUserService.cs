@@ -1,5 +1,6 @@
 ﻿using API.DataModels.FEB_CMS;
-using API.Models;
+using API.Models.MIS;
+using API.Models.FEB_CMS;
 using API.Services.LDAP;
 using Microsoft.EntityFrameworkCore;
 using System.Diagnostics;
@@ -93,7 +94,7 @@ namespace API.Services.FEB_CMS
                 // 5. 儲存與日誌
                 if (hasChanges)
                 {
-                    //await _febCmsContext.SaveChangesAsync();
+                    await _febCmsContext.SaveChangesAsync();
                     result.Message = $"本次自動更新已結束，共計 {result.ResignedUsersUpdatedCount} 筆離職未移除，{result.JobTitlesUpdatedCount} 筆職稱異動。";
                     _logger.LogInformation(result.Message);
                 }

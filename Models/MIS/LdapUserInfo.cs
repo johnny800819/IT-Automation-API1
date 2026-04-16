@@ -1,6 +1,6 @@
 ﻿// 2025/1/7已從DB中刪除此VIEW
 
-namespace API.Models
+namespace API.Models.MIS
 {
     public partial class LdapUserInfo
     {

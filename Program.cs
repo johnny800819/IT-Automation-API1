@@ -2,11 +2,14 @@ using API.Classes;
 using API.Classes.LDAP;
 using API.Classes.Reporting;
 using API.Classes.VMware;
-using API.Models;
+using API.Models.MIS;
+using API.Models.FEB_CMS;
+using API.Models.AppAudit;
 using API.Services.FEB_CMS;
 using API.Services.LDAP;
 using API.Services.Veeam;
 using API.Services.VMware;
+using API.Services.AppAudit;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using NLog;
@@ -22,58 +25,16 @@ try
     //**************** Add services to the container. ****************
     var builder = WebApplication.CreateBuilder(args);
 
-    //=========================
-    // µù¥U Windows DPAPI ¸ê®Æ«OÅ@ªA°È
-    builder.Services.AddDataProtection().ProtectKeysWithDpapi();
-
-    // ³]©wÀÉ¸ü¤JÅŞ¿è
+    // [çµ„æ…‹] é–‹ç™¼ç’°å¢ƒè¼‰å…¥ secrets.dev.jsonï¼ˆå« DB å¯†ç¢¼ç­‰æ©Ÿå¯†ï¼Œä¸é€² Gitï¼‰
     if (builder.Environment.IsDevelopment())
     {
-        // 1. ¶}µoÀô¹Ò¡G
-        //    §Ú­Ìª½±µÅª¨ú©ú½Xªº secrets.dev.json
-        logger.Debug("°»´ú¨ì¡u¶}µo¡vÀô¹Ò¡A¥¿¦b¸ü¤J secrets.dev.json (©ú½X)");
+        logger.Debug("é–‹ç™¼ç’°å¢ƒï¼šè¼‰å…¥ secrets.dev.json");
         builder.Configuration.AddJsonFile("secrets.dev.json", optional: true, reloadOnChange: true);
     }
-    else
-    {
-        // 2. ¥¿¦¡Àô¹Ò (©Î«D¶}µoÀô¹Ò)¡G
-        //    §Ú­Ì¹Á¸ÕÅª¨ú¨Ã¸Ñ±K secrets.prod.enc
-        logger.Debug("°»´ú¨ì¡u¥¿¦¡¡vÀô¹Ò¡A¥¿¦b¸ü¤J secrets.prod.enc (¥[±KÀÉ)");
-        const string encryptedSecretsFile = "secrets.prod.enc";
-        if (File.Exists(encryptedSecretsFile))
-        {
-            try
-            {
-                // 1. Åª¨ú¡u¥[±K¡vÀÉ®× (Base64 ¦r¦ê)
-                string encryptedBase64 = File.ReadAllText(encryptedSecretsFile);
+    // [çµ„æ…‹] æ­£å¼ç’°å¢ƒï¼šæ©Ÿå¯†ç”± Windows ç³»çµ±ç’°å¢ƒè®Šæ•¸æä¾›ï¼ŒIIS é‡å•Ÿå¾Œç”Ÿæ•ˆ
 
-                // 2. ©I¥s¨ç¦¡®wªº¡u¸Ñ±K¡v¥\¯à
-                //    (ª`·N¡G§Ú­Ì¨Ï¥Î¡u§¹¥ş­­©w¦WºÙ¡v¨ÓÁ×§K¦WºÙ½Ä¬ğ)
-                string decryptedJson = Utils.DpapiProvider.DpapiProvider.Decrypt(encryptedBase64);
 
-                // 3. ±N¸Ñ±Kªº JSON ¦r¦ê¸ü¤J¨ì .NET ²ÕºA¤¤
-                using (var stream = new MemoryStream(Encoding.UTF8.GetBytes(decryptedJson)))
-                {
-                    builder.Configuration.AddJsonStream(stream);
-                }
-
-                logger.Info("¤w¦¨¥\¸ü¤J¨Ã¸Ñ±K secrets.prod.enc");
-            }
-            catch (Exception ex)
-            {
-                // ¸Ñ±K¥¢±Ñ¡A³o«ÜÄY­«¡Aµ{¦¡À³¸Ó°±¤î±Ò°Ê
-                logger.Error(ex, "¸Ñ±K secrets.prod.enc ¥¢±Ñ¡I");
-                throw;
-            }
-        }
-        else
-        {
-            logger.Warn($"§ä¤£¨ì¥¿¦¡Àô¹Òªº¥[±K³]©wÀÉ: {encryptedSecretsFile}");
-        }
-    }
-    //=========================
-
-    // ±N ¸ê®Æ®wContext ¥[¤JªA°È®e¾¹¤¤¡A¥H«K¦bÀ³¥Îµ{¦¡¤¤¶i¦æ¨Ì¿àª`¤J (µ{¦¡­n¨Ï¥Î«Øºc¤lConstructure¤~¯à¯u¥¿ª`¤J)
+    // [è³‡æ–™åº«] ä½¿ç”¨ EF Core é€£æ¥ MISContext èˆ‡ FEB_CMSContextï¼ˆScoped ç”Ÿå‘½é€±æœŸï¼‰
     builder.Services.AddDbContext<MISContext>(options =>
         options.UseSqlServer(builder.Configuration.GetConnectionString("MISContext")));
     builder.Services.AddDbContext<FEB_CMSContext>(options =>
@@ -83,64 +44,61 @@ try
     builder.Services.AddEndpointsApiExplorer();
     builder.Services.AddSwaggerGen();
 
-    // ±N Config Ãş§O»P appsettings.json ¤¤ªº "...Config" °Ï¶ô¸j©w
+    // [å¼·å‹åˆ¥è¨­å®š] å°‡ appsettings.json å„ Section ç¶å®šè‡³ IOptions<T> ä¾›æ³¨å…¥ä½¿ç”¨
     builder.Services.Configure<LdapConfig>(builder.Configuration.GetSection("LdapConfig"));
     builder.Services.Configure<VMwareConfig>(builder.Configuration.GetSection("VMwareConfig"));
     builder.Services.Configure<AdAuditConfig>(builder.Configuration.GetSection("AdAuditSettings"));
+    builder.Services.Configure<AppAuditSettings>(builder.Configuration.GetSection("AppAuditSettings")); // æ‡‰ç”¨ç³»çµ±ç¨½æ ¸ï¼ˆçµ„æ…‹é©…å‹•ï¼‰
 
-    // ** ¦b³o¸Ì(DI)µù¥U§Ú­Ì©Ò¦³ªº¦Û­qªA°È **
-    // AddScoped ªº·N«ä¬O¡G¦b¦P¤@­Ó HTTP ½Ğ¨Dªº¥Í©R¶g´Á¤¤¡A©Ò¦³ªº­n¨D³£·|®³¨ì¦P¤@­Óª«¥ó¡C
+    // [DI æœå‹™] AddScoped = æ¯å€‹ HTTP è«‹æ±‚å–å¾—åŒä¸€å€‹å¯¦ä¾‹ï¼Œè«‹æ±‚çµæŸå¾Œé‡‹æ”¾
     builder.Services.AddScoped<IMailSend, MailSend>();
     builder.Services.AddScoped<ILdapService, LdapService>();
     builder.Services.AddScoped<IFebCmsUserService, FebCmsUserService>();
+    builder.Services.AddScoped<API.Services.Database.IDatabaseAuditService, API.Services.Database.DatabaseAuditService>();
+    builder.Services.AddScoped<API.Services.VMware.IVmAuditService, API.Services.VMware.VmAuditService>();
+    builder.Services.AddScoped<IAppAuditService, AppAuditService>();
     builder.Services.AddScoped<IVeeamService, VeeamService>();
     builder.Services.AddScoped<IVMwareService, VMwareService>();
     builder.Services.AddScoped<IExcelService, ExcelService>();
 
-    // NLog °òÂ¦³]©w NLog: Setup NLog for Dependency injection
+    // [æ—¥èªŒ] ä½¿ç”¨ NLog å–ä»£ .NET å…§å»ºæ—¥èªŒ
     builder.Logging.ClearProviders();
     builder.Host.UseNLog();
 
-    // Àò¨ú¥Í¦¨ªº XML ¤å¥óªº¸ô®|(XML ¤åÀÉ³q±`·|³Q¥Í¦¨¨ì¶µ¥Øªº¿é¥X¥Ø¿ı¡A¨Ò¦p bin/Debug/net6.0/{YourProjectName}.xml)
+    // [Swagger] è¼‰å…¥ XML æ–‡ä»¶ä»¥é¡¯ç¤º API èªªæ˜ï¼ˆéœ€åœ¨å°ˆæ¡ˆè¨­å®šå•Ÿç”¨ XML è¼¸å‡ºï¼‰
     var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
     var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
-    builder.Services.AddSwaggerGen(c => c.IncludeXmlComments(xmlPath));// °t¸m Swagger¡A±N¥Í¦¨ªº XML ¤åÀÉ¥]§t¶i¥h
+    builder.Services.AddSwaggerGen(c => c.IncludeXmlComments(xmlPath));
 
+    // [HTTP Client] NoSSL = ç•¥éæ†‘è­‰é©—è­‰ï¼ˆç”¨æ–¼å…§ç¶²æœå‹™ï¼‰ï¼›é è¨­ = æœ‰ SSL é©—è­‰
     builder.Services.AddHttpClient("NoSSL")
         .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
         {
-            ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => true // ©¿²¤ SSL ÅçÃÒ
+            ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => true
         });
-
-    builder.Services.AddHttpClient(); // ¹w³]ªº SSL ÅçÃÒ
+    builder.Services.AddHttpClient();
 
     /*****************************************************************/
     var app = builder.Build();
 
-    // Configure the HTTP request pipeline.
-    if (app.Environment.IsDevelopment())
-    {
-        // ¶}µoÀô¹Ò¤Uªº¨ä¥L°t¸m¡]¨Ò¦p¡G¸Ô²Ó¿ù»~­¶­±µ¥¡^
-    }
+    // [ä¸­ä»‹è»Ÿé«”] é–‹ç™¼ç’°å¢ƒä¹Ÿå•Ÿç”¨ Swaggerï¼ˆä¸é™ç’°å¢ƒï¼‰
     app.UseSwagger();
     app.UseSwaggerUI();
 
     //app.UseHttpsRedirection();
 
     app.UseAuthorization();
-
     app.MapControllers();
-
     app.Run();
 }
 catch (Exception ex)
 {
-    // ®·Àò¨Ò¥~¨Ã°O¿ı
-    logger.Error(ex, "Program °±¤î·N¥~");
+    // æ•æ‰å•Ÿå‹•éšæ®µçš„è‡´å‘½éŒ¯èª¤
+    logger.Error(ex, "Program å•Ÿå‹•å¤±æ•—");
     throw;
 }
 finally
 {
-    // ½T«O NLog ¸ê·½ÄÀ©ñ
+    // ç¢ºä¿ NLog ç·©è¡å€å®Œæ•´å¯«å‡ºå¾Œé—œé–‰
     LogManager.Shutdown();
 }

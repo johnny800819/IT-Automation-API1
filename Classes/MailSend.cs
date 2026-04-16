@@ -1,4 +1,4 @@
-﻿#nullable enable
+#nullable enable
 
 // 使用MimeKit套件(官方推薦)
 using MimeKit;
@@ -44,11 +44,11 @@ namespace API.Classes
         /// <param name="receiverAddress">收件人信箱地址</param>
         public void MailSendExecute(string emailSubject, string emailBody, string receiverAddress = "")
         {
-            // 從注入的 _config 讀取
-            string? smtpServer = _config.GetValue<string>("MailSend:SMTPServer");
+            // 從注入的 _config 讀取，並提供預設值防止 Null 警告
+            string smtpServer = _config.GetValue<string>("MailSend:SMTPServer") ?? "";
             int serverPort = _config.GetValue<int>("MailSend:ServerPort");
-            string? senderName = _config.GetValue<string>("MailSend:SenderName");
-            string? senderAddress = _config.GetValue<string>("MailSend:SenderAddress");
+            string senderName = _config.GetValue<string>("MailSend:SenderName") ?? "IT Automation System";
+            string senderAddress = _config.GetValue<string>("MailSend:SenderAddress") ?? "noreply@feb.gov.tw";
             string? ccReceiverAddress = _config.GetValue<string>("MailSend:CcReceiverAddress");
 
             // MimeKit 設定
