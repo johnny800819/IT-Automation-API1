@@ -375,14 +375,15 @@ namespace API.Classes.Reporting
         private void PopulateAppWorksheet(ExcelWorksheet worksheet, string systemTitle, List<AuditAppAccountHistory> data)
         {
             // --- 1. 設定大標題 (第一列) ---
-            worksheet.Cells[1, 1].Value = $"{systemTitle}帳號清查作業";
+            worksheet.Cells[1, 1].Value = $"{systemTitle}帳號清查作業\n({worksheet.Name})";
             worksheet.Cells[1, 1, 1, 4].Merge = true; // 合併 A1 到 D1
-            worksheet.Cells[1, 1].Style.Font.Size = 20;
+            worksheet.Cells[1, 1].Style.Font.Size = 16; // 稍微調小字體以適應換行
             worksheet.Cells[1, 1].Style.Font.Bold = true;
             worksheet.Cells[1, 1].Style.Font.Name = "標楷體";
             worksheet.Cells[1, 1].Style.HorizontalAlignment = ExcelHorizontalAlignment.Center;
             worksheet.Cells[1, 1].Style.VerticalAlignment = ExcelVerticalAlignment.Center;
-            worksheet.Row(1).Height = 35;
+            worksheet.Cells[1, 1].Style.WrapText = true; // 啟動自動換行
+            worksheet.Row(1).Height = 60; // 增加高度以容納兩行文字
 
             // --- 2. 設定欄位標頭 (第二列) ---
             worksheet.Cells[2, 1].Value = "組室";

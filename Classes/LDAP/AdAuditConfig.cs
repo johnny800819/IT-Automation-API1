@@ -1,4 +1,4 @@
-﻿namespace API.Classes.LDAP
+namespace API.Classes.LDAP
 {
     /// <summary>
     /// 代表 'appsettings.json' 中 'AdAuditSettings' 區塊的強型別設定模型。
@@ -36,11 +36,5 @@
         /// 對應 appsettings.json 中的 'AdAuditSettings:PrivilegedGroups'。
         /// </summary>
         public List<string> PrivilegedGroups { get; set; } = new();
-
-        /// <summary>
-        /// 直接按 sAMAccountName 指定的特權帳號列表。
-        /// 對應 appsettings.json 中的 'AdAuditSettings:PrivilegedAccounts'。
-        /// </summary>
-        public List<string> PrivilegedAccounts { get; set; } = new();
     }
 }

@@ -1,4 +1,4 @@
-using API.Classes;
+﻿using API.Classes;
 using API.Classes.LDAP;
 using API.DataModels;
 using API.DataModels.LDAP;
@@ -994,7 +994,7 @@ namespace API.Services.LDAP
                     // 定義稽核報表所需回傳的屬性
                     string[] attrs = {
                         "sAMAccountName", "displayName", "distinguishedName",
-                        "userAccountControl", "memberOf"
+                        "userAccountControl", "memberOf", "primaryGroupID"
                     };
 
                     string searchFilter = "(&(objectClass=user)(!(objectClass=computer)))";
@@ -1061,6 +1061,11 @@ namespace API.Services.LDAP
                                         .ToList() ?? new List<string>();
                                 }
 
+                                var primaryGroupId = entry.GetSafeAttribute("primaryGroupID");
+                                if (primaryGroupId == "512" && !memberOfList.Contains("Domain Admins", StringComparer.OrdinalIgnoreCase))
+                                {
+                                    memberOfList.Add("Domain Admins");
+                                }
                                 users.Add(new LdapUser
                                 {
                                     SamAccountName = entry.GetSafeAttribute("sAMAccountName"),
@@ -1118,38 +1123,23 @@ namespace API.Services.LDAP
 
                 // 2. 執行篩選與轉換 (LINQ)
                 var reportData = allUsers
-                    .Where(user =>
+                    .Select(user => new
                     {
-                        // 判斷條件一：使用者是否位於被排除的 OU 中
-                        // 使用者 DN (DistinguishedName) 若包含任何一個 ExcludedOUs 中的字串，則為 true
-                        bool isInExcludedOU = _adAuditConfig.ExcludedOUs
-                            .Any(ou => user.DistinguishedName.Contains(ou));
-
-                        // 判斷條件二：使用者是否為被排除的群組成員
-                        // 使用者的 MemberOf 屬性與 ExcludedGroups 清單是否有任何交集
-                        bool isInExcludedGroup = user.MemberOf
-                            .Intersect(simplifiedExcludedGroups, StringComparer.OrdinalIgnoreCase)
-                            .Any();
-
-                        // 核心篩選邏輯：當使用者 "不" 在排除的OU 且 "不" 在排除的群組時，才回傳 true，代表應保留此使用者
-                        return !isInExcludedOU && !isInExcludedGroup;
+                        User = user,
+                        IsInExcludedOU = _adAuditConfig.ExcludedOUs.Any(ou => user.DistinguishedName.Contains(ou)),
+                        IsInExcludedGroup = user.MemberOf.Intersect(simplifiedExcludedGroups, StringComparer.OrdinalIgnoreCase).Any(),
+                        IsPrivileged = user.MemberOf.Intersect(simplifiedPrivilegedGroups, StringComparer.OrdinalIgnoreCase).Any()
                     })
-                    .Select(user => new AdAuditReportItem
+                    .Where(x =>
                     {
-                        SamAccountName = user.SamAccountName,
-                        DisplayName = user.DisplayName,
-                        IsEnabled = user.IsActive == "Active",
-
-                        // 判斷特權帳號
-                        IsPrivileged =
-                            // 檢查 PrivilegedAccounts 列表是否有值？
-                            (_adAuditConfig.PrivilegedAccounts != null && _adAuditConfig.PrivilegedAccounts.Any())
-
-                            // IF TRUE: (有值) -> 則只使用個人列表進行判斷
-                            ? _adAuditConfig.PrivilegedAccounts.Contains(user.SamAccountName, StringComparer.OrdinalIgnoreCase)
-
-                            // ELSE: (為空) -> 則回退使用群組列表進行判斷
-                            : user.MemberOf.Intersect(simplifiedPrivilegedGroups, StringComparer.OrdinalIgnoreCase).Any()
+                        return x.IsPrivileged || (!x.IsInExcludedOU && !x.IsInExcludedGroup);
+                    })
+                    .Select(x => new AdAuditReportItem
+                    {
+                        SamAccountName = x.User.SamAccountName,
+                        DisplayName = x.User.DisplayName,
+                        IsEnabled = x.User.IsActive == "Active",
+                        IsPrivileged = x.IsPrivileged
                     })
                     .ToList();
 
