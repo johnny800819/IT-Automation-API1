@@ -1,9 +1,10 @@
-﻿using API.Classes.VMware;
+using API.Classes.VMware;
 using API.DataModels.VMware;
 using Microsoft.Extensions.Options;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Xml.Linq;
 
 namespace API.Services.VMware
 {
@@ -92,14 +93,79 @@ namespace API.Services.VMware
                             var vmPowerInfo = JsonSerializer.Deserialize<VmPowerInfo>(powerJson, options);
                         }
 
-                        // 呼叫 /guest/identity 端點來獲取IP
+                        List<string> discoveredIps = new();
+
+                        // 1. 呼叫 /guest/networking/interfaces 端點獲取所有網卡 IP（使用高效輕量 JsonDocument 解析，無需多餘模型）
+                        var netResponse = await client.GetAsync($"{envConfig.ApiBaseUrl}/vcenter/vm/{vm.VmId}/guest/networking/interfaces");
+                        if (netResponse.IsSuccessStatusCode)
+                        {
+                            var netJson = await netResponse.Content.ReadAsStringAsync();
+                            using var netDoc = JsonDocument.Parse(netJson);
+                            if (netDoc.RootElement.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (var iface in netDoc.RootElement.EnumerateArray())
+                                {
+                                    if (iface.TryGetProperty("ip", out var ipObj) &&
+                                        ipObj.TryGetProperty("ip_addresses", out var ipList) &&
+                                        ipList.ValueKind == JsonValueKind.Array)
+                                    {
+                                        foreach (var ipDetail in ipList.EnumerateArray())
+                                        {
+                                            if (ipDetail.TryGetProperty("ip_address", out var ipVal))
+                                            {
+                                                var rawIp = ipVal.GetString()?.Trim();
+                                                // 過濾無效 IP、IPv6、127.0.0.1、169.254.x.x
+                                                if (!string.IsNullOrEmpty(rawIp) &&
+                                                    !rawIp.Contains(':') &&
+                                                    !rawIp.StartsWith("127.") &&
+                                                    !rawIp.StartsWith("169.254.") &&
+                                                    !discoveredIps.Contains(rawIp))
+                                                {
+                                                    discoveredIps.Add(rawIp);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. 呼叫 /guest/identity 端點來獲取身分資訊與備援 IP
                         var identityResponse = await client.GetAsync($"{envConfig.ApiBaseUrl}/vcenter/vm/{vm.VmId}/guest/identity");
+                        string identityIp = null;
                         if (identityResponse.IsSuccessStatusCode)
                         {
                             var identityJson = await identityResponse.Content.ReadAsStringAsync();
                             var vmIdentity = JsonSerializer.Deserialize<VmGuestIdentity>(identityJson, options); // 反序列化 VmGuestIdentity
-                            vm.IpAddress = vmIdentity?.IpAddress; // 安全地存取屬性
+                            identityIp = vmIdentity?.IpAddress?.Trim();
+                            vm.GuestOS = vmIdentity?.GetGuestFullName(); // 取得客體作業系統完整名稱
                         }
+
+                        // 若 identity 端點有提供 IP 且尚未納入，補充至清單中
+                        if (!string.IsNullOrEmpty(identityIp) && !identityIp.Contains(':') && !discoveredIps.Contains(identityIp))
+                        {
+                            discoveredIps.Add(identityIp);
+                        }
+
+                        // 3. 依環境規則排序 IP：Primary IP 置頂，其餘次要 IP 接在後方
+                        // 正式區：Primary IP 為 10.13.1.X 或 10.13.30.X
+                        // 測試區：Primary IP 為 10.13.20.X
+                        var sortedIps = discoveredIps.OrderBy(ip =>
+                        {
+                            if (environmentKey == "Production")
+                            {
+                                if (ip.StartsWith("10.13.1.") || ip.StartsWith("10.13.30.")) return 1;
+                                return 2;
+                            }
+                            else // Test
+                            {
+                                if (ip.StartsWith("10.13.20.")) return 1;
+                                return 2;
+                            }
+                        }).ThenBy(ip => ip).ToList();
+
+                        vm.IpAddresses = sortedIps;
+                        vm.IpAddress = sortedIps.FirstOrDefault() ?? identityIp;
                     }
                     catch (Exception ex)
                     {
@@ -123,6 +189,308 @@ namespace API.Services.VMware
             {
                 // --- 4. 登出 Session (最佳實踐) ---
                 await LogoutSessionAsync(client, envConfig, sessionToken);
+            }
+        }
+
+        /// <inheritdoc/>
+        public async Task<List<VmInfo>> GetVmsHardwareInfoAsync(string environmentKey)
+        {
+            _logger.LogInformation("開始獲取 VMware vCenter ({Environment}) 之虛擬機硬體配置資訊...", environmentKey);
+
+            // 呼叫獲取完整硬體規格 (CPU, 記憶體, GuestOS, IP, 開機狀態) 的 VM 列表
+            var vmList = await GetVmsAsync(environmentKey);
+
+            var totalMemoryGB = vmList.Sum(v => v.MemorySizeGB ?? 0);
+            var totalCpus = vmList.Sum(v => v.CpuCount ?? 0);
+
+            _logger.LogInformation("成功獲取 VMware ({Environment}) 硬體資訊：共 {Count} 台 VM，總配置 CPU: {TotalCpus} 核心，總配置記憶體: {TotalMemoryGB:F2} GB",
+                environmentKey, vmList.Count, totalCpus, totalMemoryGB);
+
+            return vmList;
+        }
+
+        /// <inheritdoc/>
+        public async Task<List<EsxiHostInfo>> GetActiveEsxiHostsHardwareAsync(string environmentKey)
+        {
+            _logger.LogInformation("開始從 VMware vCenter ({Environment}) 獲取符合條件的 ESXi 實體主機硬體資訊...", environmentKey);
+
+            if (!_vmwareConfig.Environments.TryGetValue(environmentKey, out var envConfig))
+            {
+                _logger.LogError("找不到指定的 VMware 環境設定：{Environment}", environmentKey);
+                throw new ArgumentException($"無效的環境金鑰: {environmentKey}");
+            }
+
+            var client = _httpClientFactory.CreateClient("NoSSL");
+            string sessionToken = null;
+            var hostList = new List<EsxiHostInfo>();
+
+            try
+            {
+                // 1. 透過 REST API 取得所有主機基本資訊
+                sessionToken = await GetSessionTokenAsync(client, envConfig);
+                if (sessionToken != null)
+                {
+                    client.DefaultRequestHeaders.Clear();
+                    client.DefaultRequestHeaders.Add("vmware-api-session-id", sessionToken);
+
+                    var hostResponse = await client.GetAsync($"{envConfig.ApiBaseUrl}/vcenter/host");
+                    if (hostResponse.IsSuccessStatusCode)
+                    {
+                        var hostJson = await hostResponse.Content.ReadAsStringAsync();
+                        using var doc = JsonDocument.Parse(hostJson);
+                        if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var h in doc.RootElement.EnumerateArray())
+                            {
+                                var hostInfo = new EsxiHostInfo
+                                {
+                                    HostId = h.TryGetProperty("host", out var hostProp) ? hostProp.GetString() : null,
+                                    Name = h.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null,
+                                    ConnectionState = h.TryGetProperty("connection_state", out var connProp) ? connProp.GetString() : null,
+                                    PowerState = h.TryGetProperty("power_state", out var powerProp) ? powerProp.GetString() : null
+                                };
+                                hostList.Add(hostInfo);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        var errorContent = await hostResponse.Content.ReadAsStringAsync();
+                        _logger.LogWarning("REST API /vcenter/host 回傳失敗。HTTP Status: {StatusCode}, Content: {Content}", hostResponse.StatusCode, errorContent);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "透過 REST API 查詢 ESXi 主機清單時發生非阻斷性異常。");
+            }
+            finally
+            {
+                await LogoutSessionAsync(client, envConfig, sessionToken);
+            }
+
+            if (hostList.Count == 0)
+            {
+                _logger.LogInformation("未發現任何 ESXi 主機或無法透過 REST API 取得主機清單。");
+                return hostList;
+            }
+
+            // 2. 透過原生 SOAP Web Service (/sdk) 查詢實體 RAM、CPU、維護模式與 VM 數量
+            try
+            {
+                await QueryEsxiHostDetailsViaSoapAsync(client, envConfig, hostList);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "透過 SOAP Web Service 查詢 ESXi 主機硬體細節時發生異常，將保留已知資訊。");
+            }
+
+            // 3. 嚴格依條件篩選：
+            foreach (var h in hostList)
+            {
+                _logger.LogInformation("ESXi 篩選前屬性 - {Name} (ID: {HostId}): ConnectionState={ConnectionState}, InMaintenance={InMaintenanceMode}, VmCount={VmCount}, RAM(GB)={MemorySizeGB}, CPU={CpuCores}",
+                    h.Name ?? "N/A", h.HostId ?? "N/A", h.ConnectionState ?? "null", h.InMaintenanceMode, h.VmCount, h.MemorySizeGB, h.CpuCores);
+            }
+
+            // 前提條件：1. 連線正常且非維護模式 (!InMaintenanceMode)； 2. 該 ESXi 上有搭載 VM (VmCount > 0)
+            var filteredHosts = hostList.Where(h =>
+                string.Equals(h.ConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase) &&
+                !h.InMaintenanceMode &&
+                h.VmCount > 0
+            ).ToList();
+
+            var totalHostRAM = filteredHosts.Sum(h => h.MemorySizeGB ?? 0);
+            var totalHostCPUs = filteredHosts.Sum(h => h.CpuCores ?? 0);
+
+            _logger.LogInformation("ESXi 主機硬體篩選完畢：總主機 {Total} 台，符合條件（非維護且搭載 VM）共 {Count} 台，實體總 RAM: {TotalRAM:F2} GB，實體總 CPU: {TotalCPUs} 核心",
+                hostList.Count, filteredHosts.Count, totalHostRAM, totalHostCPUs);
+
+            return filteredHosts;
+        }
+
+        /// <inheritdoc/>
+        public async Task<VmHardwareReportData> GetVmHardwareReportDataAsync(string environmentKey)
+        {
+            _logger.LogInformation("開始並行獲取 VM 列表與 ESXi 實體主機硬體匯總 ({Environment})...", environmentKey);
+
+            var vmTask = GetVmsHardwareInfoAsync(environmentKey);
+            var hostTask = GetActiveEsxiHostsHardwareAsync(environmentKey);
+
+            await Task.WhenAll(vmTask, hostTask);
+
+            return new VmHardwareReportData
+            {
+                VmList = await vmTask,
+                ActiveEsxiHosts = await hostTask
+            };
+        }
+
+        /// <summary>
+        /// 透過原生 vSphere SOAP Web Service (/sdk) 批次查詢 ESXi 主機的實體記憶體、CPU 核心數、維護模式與 VM 數量。
+        /// </summary>
+        private async Task QueryEsxiHostDetailsViaSoapAsync(HttpClient client, VMwareEnvironment envConfig, List<EsxiHostInfo> hostList)
+        {
+            var uri = new Uri(envConfig.ApiBaseUrl);
+            var sdkUrl = $"{uri.Scheme}://{uri.Authority}/sdk";
+            _logger.LogInformation("正在連線 vSphere SOAP Web Service: {SdkUrl}", sdkUrl);
+
+            // 1. RetrieveServiceContent
+            var contentReqXml = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<soapenv:Envelope xmlns:soapenv=""http://schemas.xmlsoap.org/soap/envelope/"" xmlns:urn=""urn:vim25"">
+    <soapenv:Body>
+        <urn:RetrieveServiceContent>
+            <urn:_this type=""ServiceInstance"">ServiceInstance</urn:_this>
+        </urn:RetrieveServiceContent>
+    </soapenv:Body>
+</soapenv:Envelope>";
+
+            var contentResp = await client.PostAsync(sdkUrl, new StringContent(contentReqXml, Encoding.UTF8, "text/xml"));
+            if (!contentResp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("RetrieveServiceContent 呼叫失敗: {StatusCode}", contentResp.StatusCode);
+                return;
+            }
+
+            var contentXmlStr = await contentResp.Content.ReadAsStringAsync();
+            var contentDoc = XDocument.Parse(contentXmlStr);
+            XNamespace urn = "urn:vim25";
+
+            var sessionManagerVal = contentDoc.Descendants(urn + "sessionManager").FirstOrDefault()?.Value ?? "SessionManager";
+            var propCollectorVal = contentDoc.Descendants(urn + "propertyCollector").FirstOrDefault()?.Value ?? "propertyCollector";
+
+            // 2. Login
+            var loginReqXml = $@"<?xml version=""1.0"" encoding=""UTF-8""?>
+<soapenv:Envelope xmlns:soapenv=""http://schemas.xmlsoap.org/soap/envelope/"" xmlns:urn=""urn:vim25"">
+    <soapenv:Body>
+        <urn:Login>
+            <urn:_this type=""SessionManager"">{sessionManagerVal}</urn:_this>
+            <urn:userName>{System.Security.SecurityElement.Escape(envConfig.Username)}</urn:userName>
+            <urn:password>{System.Security.SecurityElement.Escape(envConfig.Password)}</urn:password>
+        </urn:Login>
+    </soapenv:Body>
+</soapenv:Envelope>";
+
+            var loginResp = await client.PostAsync(sdkUrl, new StringContent(loginReqXml, Encoding.UTF8, "text/xml"));
+            if (!loginResp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("SOAP Login 呼叫失敗: {StatusCode}", loginResp.StatusCode);
+                return;
+            }
+
+            string soapCookie = null;
+            if (loginResp.Headers.TryGetValues("Set-Cookie", out var cookieHeaders))
+            {
+                soapCookie = cookieHeaders.FirstOrDefault();
+            }
+
+            try
+            {
+                // 3. 準備 RetrievePropertiesEx 請求
+                var objSetXml = new StringBuilder();
+                foreach (var h in hostList)
+                {
+                    if (!string.IsNullOrEmpty(h.HostId))
+                    {
+                        objSetXml.Append($@"<urn:objectSet><urn:obj type=""HostSystem"">{h.HostId}</urn:obj></urn:objectSet>");
+                    }
+                }
+
+                var propReqXml = $@"<?xml version=""1.0"" encoding=""UTF-8""?>
+<soapenv:Envelope xmlns:soapenv=""http://schemas.xmlsoap.org/soap/envelope/"" xmlns:urn=""urn:vim25"">
+    <soapenv:Body>
+        <urn:RetrieveProperties>
+            <urn:_this type=""PropertyCollector"">{propCollectorVal}</urn:_this>
+            <urn:specSet>
+                <urn:propSet>
+                    <urn:type>HostSystem</urn:type>
+                    <urn:pathSet>name</urn:pathSet>
+                    <urn:pathSet>hardware.memorySize</urn:pathSet>
+                    <urn:pathSet>hardware.cpuInfo.numCpuCores</urn:pathSet>
+                    <urn:pathSet>runtime.inMaintenanceMode</urn:pathSet>
+                    <urn:pathSet>vm</urn:pathSet>
+                </urn:propSet>
+                {objSetXml}
+            </urn:specSet>
+        </urn:RetrieveProperties>
+    </soapenv:Body>
+</soapenv:Envelope>";
+
+                var propReq = new HttpRequestMessage(HttpMethod.Post, sdkUrl);
+                propReq.Content = new StringContent(propReqXml, Encoding.UTF8, "text/xml");
+                if (!string.IsNullOrEmpty(soapCookie))
+                {
+                    propReq.Headers.Add("Cookie", soapCookie.Split(';')[0]);
+                }
+
+                var propResp = await client.SendAsync(propReq);
+                if (propResp.IsSuccessStatusCode)
+                {
+                    var propXmlStr = await propResp.Content.ReadAsStringAsync();
+                    var propDoc = XDocument.Parse(propXmlStr);
+
+                    // 解析每台主機的屬性
+                    foreach (var objElem in propDoc.Descendants(urn + "returnval"))
+                    {
+                        var objId = objElem.Element(urn + "obj")?.Value;
+                        var host = hostList.FirstOrDefault(h => h.HostId == objId);
+                        if (host == null) continue;
+
+                        foreach (var propElem in objElem.Descendants(urn + "propSet"))
+                        {
+                            var name = propElem.Element(urn + "name")?.Value;
+                            var valElem = propElem.Element(urn + "val");
+
+                            switch (name)
+                            {
+                                case "name":
+                                    if (string.IsNullOrEmpty(host.Name)) host.Name = valElem?.Value;
+                                    break;
+                                case "hardware.memorySize":
+                                    if (long.TryParse(valElem?.Value, out var memBytes)) host.MemorySizeBytes = memBytes;
+                                    break;
+                                case "hardware.cpuInfo.numCpuCores":
+                                    if (int.TryParse(valElem?.Value, out var cores)) host.CpuCores = cores;
+                                    break;
+                                case "runtime.inMaintenanceMode":
+                                    if (bool.TryParse(valElem?.Value, out var inMaint)) host.InMaintenanceMode = inMaint;
+                                    break;
+                                case "vm":
+                                    // ManagedObjectReference 陣列
+                                    host.VmCount = valElem?.Elements().Count() ?? 0;
+                                    break;
+                            }
+                        }
+                    }
+                    _logger.LogInformation("成功解析 {Count} 台 ESXi 主機之 SOAP 實體硬體屬性。", hostList.Count);
+                }
+                else
+                {
+                    var errorContent = await propResp.Content.ReadAsStringAsync();
+                    _logger.LogWarning("SOAP API RetrievePropertiesEx 回傳失敗。HTTP Status: {StatusCode}, Content: {Content}", propResp.StatusCode, errorContent);
+                }
+            }
+            finally
+            {
+                // 4. Logout Session
+                try
+                {
+                    var logoutXml = $@"<?xml version=""1.0"" encoding=""UTF-8""?>
+<soapenv:Envelope xmlns:soapenv=""http://schemas.xmlsoap.org/soap/envelope/"" xmlns:urn=""urn:vim25"">
+    <soapenv:Body>
+        <urn:Logout>
+            <urn:_this type=""SessionManager"">{sessionManagerVal}</urn:_this>
+        </urn:Logout>
+    </soapenv:Body>
+</soapenv:Envelope>";
+                    var logoutReq = new HttpRequestMessage(HttpMethod.Post, sdkUrl);
+                    logoutReq.Content = new StringContent(logoutXml, Encoding.UTF8, "text/xml");
+                    if (!string.IsNullOrEmpty(soapCookie)) logoutReq.Headers.Add("Cookie", soapCookie.Split(';')[0]);
+                    await client.SendAsync(logoutReq);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "SOAP Logout 時發生非阻斷性異常。");
+                }
             }
         }
 

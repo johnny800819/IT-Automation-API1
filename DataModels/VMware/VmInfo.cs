@@ -1,4 +1,5 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace API.DataModels.VMware
 {
@@ -24,6 +25,7 @@ namespace API.DataModels.VMware
         /// </summary>
         [JsonPropertyName("vm")]
         public string VmId { get; set; }
+
         /// <summary>
         /// 虛擬機的上次開機時間 (本地時間)。
         /// </summary>
@@ -36,6 +38,33 @@ namespace API.DataModels.VMware
         /// 只有在該虛擬機上安裝並運行 VMware Tools 時才能獲取到此資訊。
         /// </remarks>
         public string IpAddress { get; set; }
+
+        /// <summary>
+        /// 虛擬機的所有有效 IPv4 位址清單（已依環境優先級排序，Primary IP 排在首位）。
+        /// </summary>
+        public List<string> IpAddresses { get; set; } = new();
+
+        /// <summary>
+        /// 虛擬機的 CPU 核心數 (vCPU)。
+        /// </summary>
+        [JsonPropertyName("cpu_count")]
+        public int? CpuCount { get; set; }
+
+        /// <summary>
+        /// 虛擬機的記憶體配置大小 (MiB)。
+        /// </summary>
+        [JsonPropertyName("memory_size_MiB")]
+        public long? MemorySizeMiB { get; set; }
+
+        /// <summary>
+        /// 虛擬機的記憶體配置大小 (GB，自動依 MiB / 1024.0 換算並四捨五入至小數點後兩位)。
+        /// </summary>
+        public double? MemorySizeGB => MemorySizeMiB.HasValue ? Math.Round(MemorySizeMiB.Value / 1024.0, 2) : null;
+
+        /// <summary>
+        /// 客體作業系統完整描述 (Guest OS Full Name)。
+        /// </summary>
+        public string GuestOS { get; set; }
     }
 
     // 註解：
@@ -46,12 +75,33 @@ namespace API.DataModels.VMware
     // 這可以避免主模型 VmInfo 被不相關的屬性污染，讓程式碼更清晰、更健壯。
 
     /// <summary>
-    /// 【輔助模型】用於從 /api/vcenter/vm/{vm_id}/guest/identity 端點解析 'ip_address'。
+    /// 【輔助模型】用於從 /api/vcenter/vm/{vm_id}/guest/identity 端點解析 'ip_address' 與作業系統名稱。
     /// </summary>
     internal class VmGuestIdentity
     {
         [JsonPropertyName("ip_address")]
         public string IpAddress { get; set; }
+
+        [JsonPropertyName("full_name")]
+        public JsonElement? FullNameElement { get; set; }
+
+        /// <summary>
+        /// 取得客體作業系統完整名稱，相容不同 vCenter 版本格式（字串或包含 default_message 的物件）。
+        /// </summary>
+        public string GetGuestFullName()
+        {
+            if (!FullNameElement.HasValue) return null;
+            var elem = FullNameElement.Value;
+            if (elem.ValueKind == JsonValueKind.String)
+            {
+                return elem.GetString();
+            }
+            if (elem.ValueKind == JsonValueKind.Object && elem.TryGetProperty("default_message", out var msg))
+            {
+                return msg.GetString();
+            }
+            return null;
+        }
     }
 
     /// <summary>

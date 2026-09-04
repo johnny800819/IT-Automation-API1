@@ -167,14 +167,15 @@ namespace API.Classes.Reporting
         private void PopulateDbWorksheet(ExcelWorksheet worksheet, List<AuditDbAccountHistory> data)
         {
             // --- 1. 設定大標題 (第一列) ---
-            worksheet.Cells[1, 1].Value = "資料庫帳號清查作業";
+            worksheet.Cells[1, 1].Value = $"資料庫帳號清查作業\r\n{worksheet.Name}";
             worksheet.Cells[1, 1, 1, 6].Merge = true; // 合併 A1 到 F1
             worksheet.Cells[1, 1].Style.Font.Size = 20;
             worksheet.Cells[1, 1].Style.Font.Bold = true;
             worksheet.Cells[1, 1].Style.Font.Name = "標楷體";
             worksheet.Cells[1, 1].Style.HorizontalAlignment = ExcelHorizontalAlignment.Center;
             worksheet.Cells[1, 1].Style.VerticalAlignment = ExcelVerticalAlignment.Center;
-            worksheet.Row(1).Height = 35; // 增加標題列高度
+            worksheet.Cells[1, 1].Style.WrapText = true; // 啟用自動換行以支援 \r\n
+            worksheet.Row(1).Height = 60; // 增加標題列高度以容納兩行文字
 
             // --- 2. 設定欄位標頭 (第二列) ---
             worksheet.Cells[2, 1].Value = "帳號名稱";

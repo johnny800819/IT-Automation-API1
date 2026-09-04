@@ -13,6 +13,7 @@
 > | 文件 | 用途 |
 > |------|------|
 > | `專案 API 架構 (文字模式).txt` | 完整的檔案架構圖、API 端點一覽、歷次重構與功能強化紀錄 |
+> | `VMware硬體與ESXi實體規格整合報表規格驅動開發文件.md` | VMware 整合硬體與 ESXi 實體主機資源查詢之 SDD 規格驅動開發文件 |
 > | `Scaffold Record 操作方法.txt` | EF Core Database-First 的 Scaffold 指令與注意事項 |
 > | `設定系統全域環境變數.txt` | 正式環境部署時的環境變數設定 SOP |
 > | `正式伺服器部署標準作業流程 (SOP).docx` | 完整的 IIS 部署流程 |
@@ -65,6 +66,7 @@
 ### VMware 服務 (`VMwareController`)
 
 * **虛擬機查詢：** 透過 vCenter API 獲取指定環境（正式/測試）的虛擬機 (VM) 列表及其電源狀態 (`GetVmsAsync`)
+* **整合硬體配置報告：** 透過 vCenter REST API 獲取所有 VM 之記憶體、vCPU、Guest OS 與網段優先排序 IP，並透過底層原生 SOAP Web Service (`/sdk`) 查詢 ESXi 實體主機之硬體 RAM 與 CPU 核心數，自動依「非維護模式」與「搭載 VM 數 > 0」進行嚴格篩選，產出包含實體/虛擬雙層資源對比之視覺化 HTML 報告 (`GetVMsHardwareReport`)
 
 ### Veeam 服務 (`VeeamController`)
 
@@ -87,7 +89,7 @@
 * **文件產生：** EPPlus.Free (Excel)
 * **郵件服務：** NETCore.MailKit、MimeKit
 * **API 文件：** Swagger/OpenAPI (Swashbuckle.AspNetCore)
-* **虛擬化管理：** VMware vCenter REST API
+* **虛擬化管理：** VMware vCenter REST API & 原生 SOAP Web Service (/sdk, RetrieveProperties)
 
 ## 安裝與設定
 
@@ -215,6 +217,7 @@ https://localhost:5001/swagger
 | 方法 | 端點 | 說明 |
 |------|------|------|
 | GET  | `/api/VMware/GetVMsList` | 取得 VMware 虛擬機狀態報表 (帶入參數 ?val=1 或 2) |
+| GET  | `/api/VMware/GetVMsHardwareReport` | 取得 VMware 整合硬體配置報告（ESXi 實體總 RAM/總 CPU、排除維護與無 VM 主機、各 VM 記憶體/vCPU/Guest OS/多 IP 排序與對比）(?val=1 正式, 2 測試) |
 
 ### Veeam 端點 (`/api/Veeam/`)
 

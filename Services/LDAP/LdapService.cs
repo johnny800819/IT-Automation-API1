@@ -1,4 +1,4 @@
-﻿using API.Classes;
+using API.Classes;
 using API.Classes.LDAP;
 using API.DataModels;
 using API.DataModels.LDAP;
@@ -1061,6 +1061,15 @@ namespace API.Services.LDAP
                                         .ToList() ?? new List<string>();
                                 }
 
+                                // =================================================================================
+                                // [核心邏輯補強] 處理 Active Directory 的主要群組 (Primary Group) 陷阱
+                                //
+                                // 為什麼要這樣做？
+                                // 在 AD 中，若使用者的「主要群組」被設為某個群組（例如 Domain Admins），
+                                // 則該群組的名稱「不會」出現在 LDAP 的 memberOf 屬性中。
+                                // 為了確保特權帳號不漏接，我們必須檢查 primaryGroupID 屬性：
+                                // - "512" 是 Domain Admins 群組的固定辨識碼 (RID)。
+                                // =================================================================================
                                 var primaryGroupId = entry.GetSafeAttribute("primaryGroupID");
                                 if (primaryGroupId == "512" && !memberOfList.Contains("Domain Admins", StringComparer.OrdinalIgnoreCase))
                                 {
@@ -1132,6 +1141,7 @@ namespace API.Services.LDAP
                     })
                     .Where(x =>
                     {
+                        // 特權帳號強制保留，不受排除規則影響；非特權帳號才依據 ExcludedOUs / ExcludedGroups 過濾
                         return x.IsPrivileged || (!x.IsInExcludedOU && !x.IsInExcludedGroup);
                     })
                     .Select(x => new AdAuditReportItem
