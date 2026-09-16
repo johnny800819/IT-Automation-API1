@@ -84,13 +84,37 @@ namespace API.Services.VMware
                     {
                         var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 
-                        // 呼叫 /power 端點來獲取開機狀態
-                        var powerResponse = await client.GetAsync($"{envConfig.ApiBaseUrl}/vcenter/vm/{vm.VmId}/power");
-                        if (powerResponse.IsSuccessStatusCode)
+                        // 呼叫 /vcenter/vm/{vm_id} 端點獲取詳細硬體 (包含虛擬磁碟 Disks 清單與開機狀態)
+                        var vmDetailResponse = await client.GetAsync($"{envConfig.ApiBaseUrl}/vcenter/vm/{vm.VmId}");
+                        if (vmDetailResponse.IsSuccessStatusCode)
                         {
-                            var powerJson = await powerResponse.Content.ReadAsStringAsync();
-                            // 使用新的 VmPowerInfo 模型來反序列化
-                            var vmPowerInfo = JsonSerializer.Deserialize<VmPowerInfo>(powerJson, options);
+                            var vmDetailJson = await vmDetailResponse.Content.ReadAsStringAsync();
+                            using var vmDoc = JsonDocument.Parse(vmDetailJson);
+                            var root = vmDoc.RootElement;
+
+                            // 取得即時開機狀態
+                            if (root.TryGetProperty("power_state", out var pState) && !string.IsNullOrEmpty(pState.GetString()))
+                            {
+                                vm.PowerState = pState.GetString();
+                            }
+
+                            // 取得所有磁碟 (Disks) 清單與大小
+                            if (root.TryGetProperty("disks", out var disksElem) && disksElem.ValueKind == JsonValueKind.Object)
+                            {
+                                var diskList = new List<VmDiskInfo>();
+                                foreach (var diskProp in disksElem.EnumerateObject())
+                                {
+                                    var diskObj = diskProp.Value;
+                                    var diskInfo = new VmDiskInfo
+                                    {
+                                        DiskId = diskProp.Name,
+                                        Label = diskObj.TryGetProperty("label", out var l) ? l.GetString() : diskProp.Name,
+                                        CapacityBytes = diskObj.TryGetProperty("capacity", out var c) && c.TryGetInt64(out var cap) ? cap : 0
+                                    };
+                                    diskList.Add(diskInfo);
+                                }
+                                vm.Disks = diskList.OrderBy(d => d.Label).ToList();
+                            }
                         }
 
                         List<string> discoveredIps = new();
@@ -456,7 +480,15 @@ namespace API.Services.VMware
                                     break;
                                 case "vm":
                                     // ManagedObjectReference 陣列
-                                    host.VmCount = valElem?.Elements().Count() ?? 0;
+                                    if (valElem != null)
+                                    {
+                                        host.VmIds = valElem.Elements().Select(e => e.Value).Where(id => !string.IsNullOrEmpty(id)).ToList();
+                                        host.VmCount = host.VmIds.Count;
+                                    }
+                                    else
+                                    {
+                                        host.VmCount = 0;
+                                    }
                                     break;
                             }
                         }

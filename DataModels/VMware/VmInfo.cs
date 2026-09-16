@@ -27,6 +27,12 @@ namespace API.DataModels.VMware
         public string VmId { get; set; }
 
         /// <summary>
+        /// 虛擬機所在的實體主機識別碼 (例如 "host-160")。
+        /// </summary>
+        [JsonPropertyName("host")]
+        public string HostId { get; set; }
+
+        /// <summary>
         /// 虛擬機的上次開機時間 (本地時間)。
         /// </summary>
         public DateTime? BootTime { get; set; }
@@ -65,6 +71,42 @@ namespace API.DataModels.VMware
         /// 客體作業系統完整描述 (Guest OS Full Name)。
         /// </summary>
         public string GuestOS { get; set; }
+
+        /// <summary>
+        /// 該虛擬機的所有虛擬磁碟清單。
+        /// </summary>
+        public List<VmDiskInfo> Disks { get; set; } = new();
+
+        /// <summary>
+        /// 該虛擬機的所有虛擬磁碟總配置大小 (GB)。
+        /// </summary>
+        public double TotalDiskCapacityGB => Math.Round(Disks.Sum(d => d.CapacityGB), 2);
+    }
+
+    /// <summary>
+    /// 代表虛擬機單一虛擬磁碟 (Virtual Disk) 資訊。
+    /// </summary>
+    public class VmDiskInfo
+    {
+        /// <summary>
+        /// 磁碟編號 (例如 "2000")。
+        /// </summary>
+        public string DiskId { get; set; }
+
+        /// <summary>
+        /// 磁碟標籤 (例如 "Hard disk 1")。
+        /// </summary>
+        public string Label { get; set; }
+
+        /// <summary>
+        /// 磁碟配置容量 (Bytes)。
+        /// </summary>
+        public long CapacityBytes { get; set; }
+
+        /// <summary>
+        /// 磁碟配置容量 (GB，自動換算至小數點第二位)。
+        /// </summary>
+        public double CapacityGB => Math.Round((double)CapacityBytes / (1024.0 * 1024.0 * 1024.0), 2);
     }
 
     // 註解：

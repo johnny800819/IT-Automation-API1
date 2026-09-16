@@ -36,6 +36,11 @@ namespace API.DataModels.VMware
         public int VmCount { get; set; }
 
         /// <summary>
+        /// 該實體主機上搭載的虛擬機 Managed Object Reference 清單 (例如 "vm-123")。
+        /// </summary>
+        public List<string> VmIds { get; set; } = new();
+
+        /// <summary>
         /// 實體主機總 CPU 核心數 (Physical CPU Cores)。
         /// </summary>
         public int? CpuCores { get; set; }
