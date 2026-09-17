@@ -74,6 +74,8 @@
 
 ### 通用服務 (`Classes/`)
 
+* **郵件服務 (`MailSend`)：** 透過 SMTP (Mail Relay) 發送郵件
+* **Excel 服務 (`ExcelService`)：** 使用 EPPlus.Free 產生 Excel 報表，統一 VM / AD / DB 三份報表的視覺風格（標楷體、大標題、狀態色彩標記）
 * **共用邏輯：** 提供跨控制器的公用公用程式類別與模型
 
 ## 技術棧
