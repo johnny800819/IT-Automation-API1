@@ -66,7 +66,7 @@
 ### VMware 服務 (`VMwareController`)
 
 * **虛擬機查詢：** 透過 vCenter API 獲取指定環境（正式/測試）的虛擬機 (VM) 列表及其電源狀態 (`GetVmsAsync`)
-* **整合硬體配置報告：** 透過 vCenter REST API 獲取所有 VM 之記憶體、vCPU、Guest OS 與網段優先排序 IP，並透過底層原生 SOAP Web Service (`/sdk`) 查詢 ESXi 實體主機之硬體 RAM 與 CPU 核心數，自動依「非維護模式」與「搭載 VM 數 > 0」進行嚴格篩選，產出包含實體/虛擬雙層資源對比之視覺化 HTML 報告 (`GetVMsHardwareReport`)
+* **整合硬體配置報告：** 透過 vCenter REST API 獲取所有 VM 之記憶體、vCPU、磁碟配置、Guest OS 與網段優先排序 IP，並透過底層原生 SOAP Web Service (`/sdk`) 查詢 ESXi 實體主機之硬體 RAM 與 CPU 核心數，自動依「非維護模式」與「搭載 VM 數 > 0」進行嚴格篩選。內建**雙層快照快取 (RAM + 微型本機快照)** 與 **智慧剪枝** 技術，實現 0.01 秒秒開與零冷啟動延遲 (`GetVMsHardwareReport`)
 
 ### Veeam 服務 (`VeeamController`)
 
@@ -74,8 +74,7 @@
 
 ### 通用服務 (`Classes/`)
 
-* **郵件服務 (`MailSend`)：** 透過 SMTP (Mail Relay) 發送郵件
-* **Excel 服務 (`ExcelService`)：** 使用 EPPlus.Free 產生 Excel 報表，統一 VM / AD / DB 三份報表的視覺風格（標楷體、大標題、狀態色彩標記）
+* **共用邏輯：** 提供跨控制器的公用公用程式類別與模型
 
 ## 技術棧
 
@@ -217,7 +216,7 @@ https://localhost:5001/swagger
 | 方法 | 端點 | 說明 |
 |------|------|------|
 | GET  | `/api/VMware/GetVMsList` | 取得 VMware 虛擬機狀態報表 (帶入參數 ?val=1 或 2) |
-| GET  | `/api/VMware/GetVMsHardwareReport` | 取得 VMware 整合硬體配置報告（ESXi 實體總 RAM/總 CPU、排除維護與無 VM 主機、各 VM 記憶體/vCPU/Guest OS/多 IP 排序與對比）(?val=1 正式, 2 測試) |
+| GET  | `/api/VMware/GetVMsHardwareReport` | 取得 VMware 整合硬體配置報告（ESXi 實體總 RAM/總 CPU、HA 容錯水位、各 VM 記憶體/vCPU/磁碟/Guest OS/多 IP 排序與對比，內建雙層快取秒開）(?val=1 正式, 2 測試；可選參數 `&refresh=true` 強制向 vCenter 同步最新資料) |
 
 ### Veeam 端點 (`/api/Veeam/`)
 

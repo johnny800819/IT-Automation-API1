@@ -43,6 +43,7 @@ try
     builder.Services.AddControllers();
     builder.Services.AddEndpointsApiExplorer();
     builder.Services.AddSwaggerGen();
+    builder.Services.AddMemoryCache(); // [快取] 啟用伺服器記憶體快取服務，支援極速快照與秒開機制
 
     // [強型別設定] 將 appsettings.json 各 Section 綁定至 IOptions<T> 供注入使用
     builder.Services.Configure<LdapConfig>(builder.Configuration.GetSection("LdapConfig"));

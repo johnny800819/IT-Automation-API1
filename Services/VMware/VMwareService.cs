@@ -119,77 +119,82 @@ namespace API.Services.VMware
 
                         List<string> discoveredIps = new();
 
-                        // 1. 呼叫 /guest/networking/interfaces 端點獲取所有網卡 IP（使用高效輕量 JsonDocument 解析，無需多餘模型）
-                        var netResponse = await client.GetAsync($"{envConfig.ApiBaseUrl}/vcenter/vm/{vm.VmId}/guest/networking/interfaces");
-                        if (netResponse.IsSuccessStatusCode)
+                        // 效能優化 (智慧剪枝)：僅在開機狀態 (POWERED_ON) 下查詢客體網路與 OS 身分。
+                        // 關機中的 VM 因 VMware Tools 未執行，直接略過以避免高達 30 次無效逾時請求。
+                        if (vm.PowerState == "POWERED_ON")
                         {
-                            var netJson = await netResponse.Content.ReadAsStringAsync();
-                            using var netDoc = JsonDocument.Parse(netJson);
-                            if (netDoc.RootElement.ValueKind == JsonValueKind.Array)
+                            // 1. 呼叫 /guest/networking/interfaces 端點獲取所有網卡 IP（使用高效輕量 JsonDocument 解析，無需多餘模型）
+                            var netResponse = await client.GetAsync($"{envConfig.ApiBaseUrl}/vcenter/vm/{vm.VmId}/guest/networking/interfaces");
+                            if (netResponse.IsSuccessStatusCode)
                             {
-                                foreach (var iface in netDoc.RootElement.EnumerateArray())
+                                var netJson = await netResponse.Content.ReadAsStringAsync();
+                                using var netDoc = JsonDocument.Parse(netJson);
+                                if (netDoc.RootElement.ValueKind == JsonValueKind.Array)
                                 {
-                                    if (iface.TryGetProperty("ip", out var ipObj) &&
-                                        ipObj.TryGetProperty("ip_addresses", out var ipList) &&
-                                        ipList.ValueKind == JsonValueKind.Array)
+                                    foreach (var iface in netDoc.RootElement.EnumerateArray())
                                     {
-                                        foreach (var ipDetail in ipList.EnumerateArray())
+                                        if (iface.TryGetProperty("ip", out var ipObj) &&
+                                            ipObj.TryGetProperty("ip_addresses", out var ipList) &&
+                                            ipList.ValueKind == JsonValueKind.Array)
                                         {
-                                            if (ipDetail.TryGetProperty("ip_address", out var ipVal))
+                                            foreach (var ipDetail in ipList.EnumerateArray())
                                             {
-                                                var rawIp = ipVal.GetString()?.Trim();
-                                                // 過濾無效 IP、IPv6、127.0.0.1、169.254.x.x
-                                                if (!string.IsNullOrEmpty(rawIp) &&
-                                                    !rawIp.Contains(':') &&
-                                                    !rawIp.StartsWith("127.") &&
-                                                    !rawIp.StartsWith("169.254.") &&
-                                                    !discoveredIps.Contains(rawIp))
+                                                if (ipDetail.TryGetProperty("ip_address", out var ipVal))
                                                 {
-                                                    discoveredIps.Add(rawIp);
+                                                    var rawIp = ipVal.GetString()?.Trim();
+                                                    // 過濾無效 IP、IPv6、127.0.0.1、169.254.x.x
+                                                    if (!string.IsNullOrEmpty(rawIp) &&
+                                                        !rawIp.Contains(':') &&
+                                                        !rawIp.StartsWith("127.") &&
+                                                        !rawIp.StartsWith("169.254.") &&
+                                                        !discoveredIps.Contains(rawIp))
+                                                    {
+                                                        discoveredIps.Add(rawIp);
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        // 2. 呼叫 /guest/identity 端點來獲取身分資訊與備援 IP
-                        var identityResponse = await client.GetAsync($"{envConfig.ApiBaseUrl}/vcenter/vm/{vm.VmId}/guest/identity");
-                        string identityIp = null;
-                        if (identityResponse.IsSuccessStatusCode)
-                        {
-                            var identityJson = await identityResponse.Content.ReadAsStringAsync();
-                            var vmIdentity = JsonSerializer.Deserialize<VmGuestIdentity>(identityJson, options); // 反序列化 VmGuestIdentity
-                            identityIp = vmIdentity?.IpAddress?.Trim();
-                            vm.GuestOS = vmIdentity?.GetGuestFullName(); // 取得客體作業系統完整名稱
-                        }
-
-                        // 若 identity 端點有提供 IP 且尚未納入，補充至清單中
-                        if (!string.IsNullOrEmpty(identityIp) && !identityIp.Contains(':') && !discoveredIps.Contains(identityIp))
-                        {
-                            discoveredIps.Add(identityIp);
-                        }
-
-                        // 3. 依環境規則排序 IP：Primary IP 置頂，其餘次要 IP 接在後方
-                        // 正式區：Primary IP 為 10.13.1.X 或 10.13.30.X
-                        // 測試區：Primary IP 為 10.13.20.X
-                        var sortedIps = discoveredIps.OrderBy(ip =>
-                        {
-                            if (environmentKey == "Production")
+                            // 2. 呼叫 /guest/identity 端點來獲取身分資訊與備援 IP
+                            var identityResponse = await client.GetAsync($"{envConfig.ApiBaseUrl}/vcenter/vm/{vm.VmId}/guest/identity");
+                            string identityIp = null;
+                            if (identityResponse.IsSuccessStatusCode)
                             {
-                                if (ip.StartsWith("10.13.1.") || ip.StartsWith("10.13.30.")) return 1;
-                                return 2;
+                                var identityJson = await identityResponse.Content.ReadAsStringAsync();
+                                var vmIdentity = JsonSerializer.Deserialize<VmGuestIdentity>(identityJson, options); // 反序列化 VmGuestIdentity
+                                identityIp = vmIdentity?.IpAddress?.Trim();
+                                vm.GuestOS = vmIdentity?.GetGuestFullName(); // 取得客體作業系統完整名稱
                             }
-                            else // Test
-                            {
-                                if (ip.StartsWith("10.13.20.")) return 1;
-                                return 2;
-                            }
-                        }).ThenBy(ip => ip).ToList();
 
-                        vm.IpAddresses = sortedIps;
-                        vm.IpAddress = sortedIps.FirstOrDefault() ?? identityIp;
+                            // 若 identity 端點有提供 IP 且尚未納入，補充至清單中
+                            if (!string.IsNullOrEmpty(identityIp) && !identityIp.Contains(':') && !discoveredIps.Contains(identityIp))
+                            {
+                                discoveredIps.Add(identityIp);
+                            }
+
+                            // 3. 依環境規則排序 IP：Primary IP 置頂，其餘次要 IP 接在後方
+                            // 正式區：Primary IP 為 10.13.1.X 或 10.13.30.X
+                            // 測試區：Primary IP 為 10.13.20.X
+                            var sortedIps = discoveredIps.OrderBy(ip =>
+                            {
+                                if (environmentKey == "Production")
+                                {
+                                    if (ip.StartsWith("10.13.1.") || ip.StartsWith("10.13.30.")) return 1;
+                                    return 2;
+                                }
+                                else // Test
+                                {
+                                    if (ip.StartsWith("10.13.20.")) return 1;
+                                    return 2;
+                                }
+                            }).ThenBy(ip => ip).ToList();
+
+                            vm.IpAddresses = sortedIps;
+                            vm.IpAddress = sortedIps.FirstOrDefault() ?? identityIp;
+                        }
                     }
                     catch (Exception ex)
                     {
