@@ -23,6 +23,9 @@ namespace API.Controllers
         private readonly IVMwareService _vmwareService;
         private readonly ILogger<VMwareController> _logger;
         private readonly IMemoryCache _memoryCache;
+        
+        // 用於防護高併發下「快取擊穿 (Cache Stampede)」的共乘鎖
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _updateLocks = new();
 
         /// <summary>
         /// 初始化 VMwareController 的新執行個體。
@@ -160,6 +163,8 @@ namespace API.Controllers
                 string cacheKey = $"VMwareHardwareReport_{environmentKey}";
                 DateTime snapshotTime = DateTime.Now;
                 bool isFromCache = false;
+                bool isCooldownHit = false;
+                int cooldownRemainingSeconds = 0;
                 VmHardwareReportData reportData = null;
 
                 if (!refresh)
@@ -197,16 +202,58 @@ namespace API.Controllers
                         }
                     }
                 }
+                else
+                {
+                    // 即使要求 refresh，仍先看快取時間。實作「冷卻時間防護 (Cooldown)」，避免連點狂炸 vCenter
+                    if (_memoryCache.TryGetValue(cacheKey, out (VmHardwareReportData Data, DateTime Timestamp) cachedItem))
+                    {
+                        var elapsedSec = (DateTime.Now - cachedItem.Timestamp).TotalSeconds;
+                        if (elapsedSec < 15)
+                        {
+                            reportData = cachedItem.Data;
+                            snapshotTime = cachedItem.Timestamp;
+                            isFromCache = true;
+                            isCooldownHit = true;
+                            cooldownRemainingSeconds = Math.Max(1, 15 - (int)elapsedSec);
+                            _logger.LogInformation("處於 15 秒冷卻保護期內 (尚餘 {cooldownRemainingSeconds} 秒)，略過 vCenter 查詢，直接返回快取。", cooldownRemainingSeconds);
+                        }
+                    }
+                }
 
-                // C. 若快取未命中或使用者點擊「即時同步 (refresh=true)」，向 vCenter 擷取 (剪枝優化後僅需約 2 秒)
+                // C. 若快取未命中或使用者點擊「即時同步 (且已過冷卻期)」，向 vCenter 擷取
+                // 實作 Single-Flight (併發合併)，防護「快取擊穿/驚群效應」
                 if (reportData == null)
                 {
-                    reportData = await _vmwareService.GetVmHardwareReportDataAsync(environmentKey);
-                    snapshotTime = DateTime.Now;
-                    isFromCache = false;
+                    var lockObj = _updateLocks.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
+                    await lockObj.WaitAsync();
+                    try
+                    {
+                        // 雙重檢查鎖定 (Double-check locking)，搭便車機制：
+                        // 如果在等待鎖的期間，別的執行緒已經幫我們查好並放入快取了，就直接拿
+                        if (_memoryCache.TryGetValue(cacheKey, out (VmHardwareReportData Data, DateTime Timestamp) checkedItem))
+                        {
+                            var elapsedSec = (DateTime.Now - checkedItem.Timestamp).TotalSeconds;
+                            if (!refresh || elapsedSec < 15)
+                            {
+                                reportData = checkedItem.Data;
+                                snapshotTime = checkedItem.Timestamp;
+                                isFromCache = true;
+                                if (refresh && elapsedSec < 15)
+                                {
+                                    isCooldownHit = true;
+                                    cooldownRemainingSeconds = Math.Max(1, 15 - (int)elapsedSec);
+                                }
+                            }
+                        }
 
-                    // 寫入記憶體快取 (保存 2 小時)
-                    _memoryCache.Set(cacheKey, (reportData, snapshotTime), TimeSpan.FromHours(2));
+                        if (reportData == null)
+                        {
+                            reportData = await _vmwareService.GetVmHardwareReportDataAsync(environmentKey);
+                            snapshotTime = DateTime.Now;
+                            isFromCache = false;
+
+                            // 寫入記憶體快取 (保存 2 小時)
+                            _memoryCache.Set(cacheKey, (reportData, snapshotTime), TimeSpan.FromHours(2));
 
                     // 背景非同步持久化至本機快照檔案 (防止重開機冷啟動)
                     _ = Task.Run(async () =>
@@ -228,6 +275,12 @@ namespace API.Controllers
                             _logger.LogWarning(ex, "儲存本機快照檔案失敗。");
                         }
                     });
+                        }
+                    }
+                    finally
+                    {
+                        lockObj.Release();
+                    }
                 }
 
                 var vmList = reportData.VmList;
@@ -277,6 +330,10 @@ namespace API.Controllers
                 int haSafeVcpuCapacity = (int)(safeCPU * RecommendedOvercommitRatio);
                 int remainingHaSafeVcpus = Math.Max(0, haSafeVcpuCapacity - totalVmCpus_On);
                 double cpuOvercommitPercentOfLimit = (currentCpuOvercommitRatio / RecommendedOvercommitRatio) * 100;
+
+                // 3. 計算距離資料產生時間是否仍在 15 秒防護冷卻期內 (若是，前端按鈕進入倒數禁用狀態)
+                var currentElapsedSec = (DateTime.Now - snapshotTime).TotalSeconds;
+                int buttonCooldownSec = currentElapsedSec < 15 ? Math.Max(1, 15 - (int)currentElapsedSec) : 0;
 
                 var htmlBuilder = new StringBuilder();
                 string envName = environmentKey == "Production" ? "正式機" : "測試機";
@@ -541,6 +598,58 @@ namespace API.Controllers
                                 border-color: #1d4ed8;
                                 transform: translateY(-1px);
                             }
+                            /* 按鈕冷卻與防連點狀態 (大型網站防呆) */
+                            .btn-refresh.btn-cooldown {
+                                background: #94a3b8 !important;
+                                border-color: #94a3b8 !important;
+                                cursor: not-allowed !important;
+                                opacity: 0.85;
+                                pointer-events: none;
+                                transform: none !important;
+                            }
+
+                            /* 浮動系統防護通知 Toast */
+                            .toast-container {
+                                position: fixed;
+                                top: 24px;
+                                right: 24px;
+                                z-index: 999999;
+                                animation: slideInRight 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+                            }
+                            @keyframes slideInRight {
+                                from { transform: translateX(120%); opacity: 0; }
+                                to { transform: translateX(0); opacity: 1; }
+                            }
+                            .toast-box {
+                                background: #ffffff;
+                                border-left: 5px solid #f59e0b;
+                                border-radius: 8px;
+                                padding: 12px 16px;
+                                box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.15), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+                                display: flex;
+                                align-items: center;
+                                gap: 12px;
+                                min-width: 320px;
+                                max-width: 460px;
+                                border-top: 1px solid #e2e8f0;
+                                border-right: 1px solid #e2e8f0;
+                                border-bottom: 1px solid #e2e8f0;
+                            }
+                            .toast-icon { font-size: 1.4em; line-height: 1; }
+                            .toast-body { flex: 1; }
+                            .toast-title { font-weight: 700; color: #0f172a; font-size: 0.92em; margin-bottom: 2px; }
+                            .toast-msg { font-size: 0.82em; color: #475569; line-height: 1.4; }
+                            .toast-close {
+                                background: none;
+                                border: none;
+                                font-size: 1.1em;
+                                color: #94a3b8;
+                                cursor: pointer;
+                                padding: 2px 6px;
+                                border-radius: 4px;
+                                transition: all 0.2s;
+                            }
+                            .toast-close:hover { color: #0f172a; background: #f1f5f9; }
                         </style>
                     </head>
                 ");
@@ -556,12 +665,40 @@ namespace API.Controllers
                     </div>
                 ");
 
+                // 若命中冷卻防護，於頁面右上角彈出優雅 Toast 提示
+                if (isCooldownHit)
+                {
+                    htmlBuilder.Append($@"
+                        <div id='toast-container' class='toast-container'>
+                            <div class='toast-box'>
+                                <div class='toast-icon'>🛡️</div>
+                                <div class='toast-body'>
+                                    <div class='toast-title'>系統保護中：顯示最新快照</div>
+                                    <div class='toast-msg'>資料剛於 {Math.Max(1, 15 - cooldownRemainingSeconds)} 秒前更新，系統設有 15 秒冷卻保護，避免重複查詢加重伺服器負載。</div>
+                                </div>
+                                <button type='button' class='toast-close' onclick='closeToast()' title='關閉提示'>✕</button>
+                            </div>
+                        </div>
+                    ");
+                }
+
                 htmlBuilder.Append($"<body><h2>{envName} VMware 資源與硬體配置報告</h2>");
 
                 // 快速導覽列 (支援釘選定位、一鍵全展開/全收合、快照標籤與即時同步按鈕)
                 string cacheStatusBadge = isFromCache 
                     ? $"<span class='cache-badge cache-cached' title='資料來源：伺服器快照 (0.01秒瞬間秒開)'>🕒 資料快照：{snapshotTime:yyyy/MM/dd HH:mm:ss} (快取模式)</span>" 
                     : $"<span class='cache-badge cache-fresh' title='資料來源：剛才連線 vCenter 獲取的最新數據'>⚡ 即時連線：{snapshotTime:yyyy/MM/dd HH:mm:ss} (最新即時)</span>";
+
+                // 按鈕動態渲染：若在冷卻期內，按鈕預設為倒數鎖定狀態
+                string refreshBtnHtml;
+                if (buttonCooldownSec > 0)
+                {
+                    refreshBtnHtml = $"<a href='?val={val}&refresh=true' id='btn-refresh-data' class='btn-refresh btn-cooldown' data-val='{val}' data-cooldown='{buttonCooldownSec}' onclick='return handleRefreshClick(event, this)'>⏳ 資料已最新 ({buttonCooldownSec}s)</a>";
+                }
+                else
+                {
+                    refreshBtnHtml = $"<a href='?val={val}&refresh=true' id='btn-refresh-data' class='btn-refresh' data-val='{val}' data-cooldown='0' onclick='return handleRefreshClick(event, this)'>🔄 即時同步最新資料</a>";
+                }
 
                 htmlBuilder.Append("<div class='quick-nav-container'>");
                 htmlBuilder.Append("<div class='quick-nav-links'>");
@@ -574,7 +711,7 @@ namespace API.Controllers
                 htmlBuilder.Append($"<a href='#sec-vms-on' class='nav-pill pill-on'>🟢 開機 VM ({poweredOnVms.Count})</a>");
                 htmlBuilder.Append($"<a href='#sec-vms-off' class='nav-pill pill-off'>🔴 關機 VM ({poweredOffVms.Count})</a>");
                 htmlBuilder.Append(cacheStatusBadge);
-                htmlBuilder.Append($"<a href='?val={val}&refresh=true' class='btn-refresh' onclick='showLoadingMask()'>🔄 即時同步最新資料</a>");
+                htmlBuilder.Append(refreshBtnHtml);
                 htmlBuilder.Append("</div>");
                 htmlBuilder.Append("<div class='nav-actions'>");
                 htmlBuilder.Append("<button type='button' class='btn-nav-toggle' onclick='toggleAllSections(true)'>全部展開</button>");
@@ -832,6 +969,31 @@ namespace API.Controllers
                             }
                         };
 
+                        // 大型網站防呆機制：防止重複點擊並即時回饋
+                        window.handleRefreshClick = function(e, btn) {
+                            if (btn.classList.contains('btn-cooldown')) {
+                                e.preventDefault();
+                                return false;
+                            }
+                            // 立即鎖定按鈕文字與游標，防止毫秒級連點狂發
+                            btn.innerText = '⏳ 正在連線同步...';
+                            btn.classList.add('btn-cooldown');
+                            btn.style.pointerEvents = 'none';
+                            showLoadingMask();
+                            return true;
+                        };
+
+                        // 關閉浮動通知 Toast
+                        window.closeToast = function() {
+                            var toast = document.getElementById('toast-container');
+                            if (toast) {
+                                toast.style.opacity = '0';
+                                toast.style.transform = 'translateX(120%)';
+                                toast.style.transition = 'all 0.4s ease';
+                                setTimeout(function() { toast.remove(); }, 400);
+                            }
+                        };
+
                         window.toggleAllSections = function(expand) {
                             document.querySelectorAll('.collapsible-section').forEach(sec => {
                                 sec.open = expand;
@@ -839,6 +1001,30 @@ namespace API.Controllers
                         };
 
                         document.addEventListener('DOMContentLoaded', function() {
+                            // 1. Toast 自動於 4 秒後優雅淡出
+                            var toast = document.getElementById('toast-container');
+                            if (toast) {
+                                setTimeout(closeToast, 4000);
+                            }
+
+                            // 2. 按鈕冷卻倒數計時機制
+                            var btn = document.getElementById('btn-refresh-data');
+                            if (btn && btn.getAttribute('data-cooldown')) {
+                                var remaining = parseInt(btn.getAttribute('data-cooldown'), 10);
+                                if (remaining > 0) {
+                                    var timer = setInterval(function() {
+                                        remaining--;
+                                        if (remaining > 0) {
+                                            btn.innerText = '⏳ 資料已最新 (' + remaining + 's)';
+                                        } else {
+                                            clearInterval(timer);
+                                            btn.innerText = '🔄 即時同步最新資料';
+                                            btn.classList.remove('btn-cooldown');
+                                            btn.style.pointerEvents = 'auto';
+                                        }
+                                    }, 1000);
+                                }
+                            }
                             // 點擊快速導覽時若目標已收合則自動展開
                             document.querySelectorAll('.nav-pill').forEach(pill => {
                                 pill.addEventListener('click', function(e) {
