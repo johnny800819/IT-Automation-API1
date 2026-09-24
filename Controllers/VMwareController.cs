@@ -564,7 +564,42 @@ namespace API.Controllers
                                 100% { transform: rotate(360deg); }
                             }
                             .loading-title { font-size: 1.15em; font-weight: 700; color: #0f172a; }
-                            .loading-desc { font-size: 0.88em; color: #64748b; line-height: 1.4; }
+                            .loading-desc { font-size: 0.88em; color: #475569; line-height: 1.5; min-height: 40px; display: flex; align-items: center; justify-content: center; }
+                            .loading-timer-badge {
+                                display: inline-flex;
+                                align-items: center;
+                                gap: 4px;
+                                background: #eff6ff;
+                                color: #1d4ed8;
+                                border: 1px solid #bfdbfe;
+                                font-weight: 700;
+                                font-size: 0.9em;
+                                padding: 3px 12px;
+                                border-radius: 12px;
+                                margin-top: 2px;
+                            }
+                            .loading-progress-track {
+                                width: 100%;
+                                height: 6px;
+                                background: #f1f5f9;
+                                border-radius: 999px;
+                                overflow: hidden;
+                                position: relative;
+                                margin-top: 6px;
+                            }
+                            .loading-progress-bar {
+                                width: 45%;
+                                height: 100%;
+                                background: linear-gradient(90deg, #3b82f6, #1d4ed8);
+                                border-radius: 999px;
+                                position: absolute;
+                                animation: indeterminateMove 1.6s ease-in-out infinite;
+                            }
+                            @keyframes indeterminateMove {
+                                0% { left: -45%; }
+                                50% { left: 40%; width: 55%; }
+                                100% { left: 100%; width: 45%; }
+                            }
                             
                             .cache-badge {
                                 font-size: 0.8em;
@@ -654,13 +689,21 @@ namespace API.Controllers
                     </head>
                 ");
 
-                // 全螢幕 Loading 遮罩
-                htmlBuilder.Append(@"
-                    <div id='loading-mask' class='loading-mask'>
+                // 全螢幕 Loading 遮罩 (支援即時動態讀秒與階段式進度回饋)
+                int vmCount = sortedVmList.Count;
+                int hostCount = activeHosts.Count;
+                htmlBuilder.Append($@"
+                    <div id='loading-mask' class='loading-mask' data-vm-count='{vmCount}' data-host-count='{hostCount}'>
                         <div class='loading-box'>
                             <div class='loading-spinner'></div>
                             <div class='loading-title'>⚡ 正在連線 VMware vCenter 同步即時數據...</div>
-                            <div class='loading-desc'>正在並行擷取 62 台虛擬機與 ESXi 實體主機規格，請稍候約 2 秒</div>
+                            <div class='loading-desc' id='loading-desc'>正在建立與 VMware vCenter 伺服器之安全通道...</div>
+                            <div class='loading-timer-badge'>
+                                <span>⏱️ 已連線等候：</span><span id='loading-timer'>1</span><span> 秒</span>
+                            </div>
+                            <div class='loading-progress-track'>
+                                <div class='loading-progress-bar'></div>
+                            </div>
                         </div>
                     </div>
                 ");
@@ -966,6 +1009,34 @@ namespace API.Controllers
                             var mask = document.getElementById('loading-mask');
                             if (mask) {
                                 mask.style.display = 'flex';
+                                var vmCount = mask.getAttribute('data-vm-count') || '多';
+                                var hostCount = mask.getAttribute('data-host-count') || '多';
+                                var timerEl = document.getElementById('loading-timer');
+                                var descEl = document.getElementById('loading-desc');
+                                var seconds = 1;
+                                if (timerEl) timerEl.innerText = seconds;
+
+                                if (window._loadingTimerInterval) {
+                                    clearInterval(window._loadingTimerInterval);
+                                }
+
+                                window._loadingTimerInterval = setInterval(function() {
+                                    seconds++;
+                                    if (timerEl) {
+                                        timerEl.innerText = seconds;
+                                    }
+                                    if (descEl) {
+                                        if (seconds < 3) {
+                                            descEl.innerText = '正在建立與 VMware vCenter 伺服器之安全通道...';
+                                        } else if (seconds < 7) {
+                                            descEl.innerText = '正在並行查詢 ' + vmCount + ' 台虛擬機與 ' + hostCount + ' 台 ESXi 主機資源...';
+                                        } else if (seconds < 12) {
+                                            descEl.innerText = '資料量較大，正在統整硬體配置、IP 資訊與計算 HA 容錯水位...';
+                                        } else {
+                                            descEl.innerText = 'vCenter 回應較慢，正耐心等候數據回傳並建立報表，即將完成...';
+                                        }
+                                    }
+                                }, 1000);
                             }
                         };
 
