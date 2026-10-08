@@ -14,6 +14,7 @@
 > |------|------|
 > | `專案 API 架構 (文字模式).txt` | 完整的檔案架構圖、API 端點一覽、歷次重構與功能強化紀錄 |
 > | `VMware硬體與ESXi實體規格整合報表規格驅動開發文件.md` | VMware 整合硬體與 ESXi 實體主機資源查詢之 SDD 規格驅動開發文件 |
+> | `Veeam備份視覺化報表美化與篩選規格驅動開發文件.md` | Veeam 備份視覺化監控儀表板、即時搜尋與最新一期篩選之 SDD 規格驅動開發文件 |
 > | `Scaffold Record 操作方法.txt` | EF Core Database-First 的 Scaffold 指令與注意事項 |
 > | `設定系統全域環境變數.txt` | 正式環境部署時的環境變數設定 SOP |
 > | `正式伺服器部署標準作業流程 (SOP).docx` | 完整的 IIS 部署流程 |
@@ -70,7 +71,22 @@
 
 ### Veeam 服務 (`VeeamController`)
 
-* **備份日誌查詢：** 從資料庫讀取 Veeam 備份工作階段的日誌 (`GetBackupSessionsAsync`)
+* **備份日誌查詢：** 從 `MIS` 資料庫讀取 Veeam 備份工作階段的日誌 (`GetBackupSessionsAsync`)，提供 JSON API 與 HTML 視覺化報表。
+  * **HTML 視覺化儀表板強化：**
+    * 導入現代化高對比護眼主題，加入陰影與斑馬紋表格設計。
+    * 提供多維度篩選（時間範圍、伺服器、關鍵字），預設顯示「近 7 天活躍」主機。
+    * 智慧狀態判定：自動辨識「正常（今昨）」、「延遲（2-7天）」與「封存/除役（超過7天）」狀態，並搭配視覺化高對比徽章。
+* **資料獲取與收集架構 (Data Pipeline)：**
+  - **資料流向：** 4 台 Veeam 伺服器 (PostgreSQL) ➔ SQL Server (10.13.20.206) Linked Server ➔ 預存程序定時寫入 ➔ `MIS.dbo.VeeamBackupSessions` ➔ Web API 讀取呈現。
+  - **排程機制：** 由 `10.13.20.206` 的 SQL Server Agent Job 定時（每日清晨 06:00）執行預存程序 `[dbo].[VeeamBackupSessionsCollection]`。
+  - **跨庫查詢技術：** 透過 SQL Server 的 **Linked Server (連結伺服器)** 搭配 `OPENQUERY`，直接查詢 4 台 Veeam 備份伺服器底層的 PostgreSQL 資料庫（資料表：`public."backup.model.backuptasksessions"`）：
+    - `10.13.1.98`
+    - `10.13.1.99`
+    - `10.13.1.100`
+    - `10.13.1.102`
+  - **資料篩選與去重邏輯：**
+    - **時間視窗：** 統一採「最近 24 小時」視窗 (`end_time >= current_timestamp - INTERVAL '24 hours'` 且 `total_size <> 0`)，避免固定的今天/昨天日期比對因排程提早結束（如 23:38 跑完）或跨夜延後而漏抓。
+    - **唯一最新：** 導入 PostgreSQL `DISTINCT ON (object_name)` 搭配 `ORDER BY object_name, end_time DESC`，確保每台 VM 在該週期只取最新一筆完成記錄寫入，避免重複寫入。
 
 ### 通用服務 (`Classes/`)
 
@@ -224,8 +240,8 @@ https://localhost:5001/swagger
 
 | 方法 | 端點 | 說明 |
 |------|------|------|
-| GET  | `/api/Veeam/GetVeeamBackupSessions` | 取得 Veeam 備份工作階段結果 |
-| GET  | `/api/Veeam/GetVeeamBackupSessionsHTML` | 取得 Veeam 備份工作階段結果 (HTML 格式) |
+| GET  | `/api/Veeam/GetVeeamBackupSessions` | 取得 Veeam 備份工作階段結果 (JSON) |
+| GET  | `/api/Veeam/GetVeeamBackupSessionsHTML` | 取得 Veeam 備份工作階段結果 (HTML 儀表板) |
 
 > 📖 **完整的 API 文件請參考 Swagger UI：** `https://localhost:5001/swagger`
 
@@ -304,10 +320,24 @@ builder.Services.AddScoped<IMailSend, MailSend>();
 
 ### Windows Server / IIS 部署
 
-1. **發佈專案：**
-   ```bash
-   dotnet publish -c Release -o ./publish
+1. **發佈專案（直接輸出至正式伺服器）：**
+   ```powershell
+   # 若 IIS 正在運行並鎖定 API.dll，先放置 app_offline.htm 讓 IIS 釋放鎖定
+   Set-Content -Path "\\FEBSR20TE\api1$\app_offline.htm" -Value "<html><body>Deploying...</body></html>"
+
+   # 執行直接發佈至遠端 UNC 路徑 (特別指定 API.csproj 是為了避免 .sln 與 -o 衝突)
+   dotnet publish "API.csproj" -c Release -o "\\FEBSR20TE\api1$" --nologo
+
+   # 發佈完成後移除 app_offline.htm 恢復站台運作
+   Remove-Item -Path "\\FEBSR20TE\api1$\app_offline.htm" -Force -ErrorAction SilentlyContinue
    ```
+   > ⚠️ **重要注意事項：**
+   > - **為什麼要特別指定 `"API.csproj"`？**  
+   >   一般情況下 `dotnet publish` 通常不需指定專案檔名，但因為本專案目錄下**同時存在 `API.sln` 與 `API.csproj`**。若不指定，.NET CLI 預設會發佈解決方案（.sln），而 .NET 規定建置解決方案時不支援 `-o` 參數，會引發 `NETSDK1194` 警告。因此特別指定 `API.csproj` 告知編譯器僅針對該專案發佈，確保輸出路徑合法且無警告。
+   > - **避免中間目錄污染：**  
+   >   請直接使用 `-o` 指向遠端 UNC 共享路徑，**不要**先 publish 到本機 `./publish` 再用 robocopy 複製，避免產生巢狀 `publish/publish` 目錄結構。
+   > - **處理 IIS DLL 鎖定：**  
+   >   若遇到 `API.dll being used by another process`，代表正式機 IIS 正在使用該 DLL，如上指令在發佈前後使用 `app_offline.htm` 即可優雅釋放並完成覆蓋更新。
 
 2. **設定環境變數：**
    - 以管理員身分執行 `批次檔/Set-EnvVariables.ps1`。
