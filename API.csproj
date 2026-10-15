@@ -17,6 +17,12 @@
 			<CopyToOutputDirectory>Copy if newer</CopyToOutputDirectory>
 			<CopyToPublishDirectory>Never</CopyToPublishDirectory>
 		</Content>
+
+		<!-- 批次檔與自動化腳本包含進發佈目錄 -->
+		<Content Include="批次檔\**">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+		</Content>
 	</ItemGroup>
 
 	<ItemGroup>

@@ -334,6 +334,10 @@ builder.Services.AddScoped<IMailSend, MailSend>();
    > ⚠️ **重要注意事項：**
    > - **為什麼要特別指定 `"API.csproj"`？**  
    >   一般情況下 `dotnet publish` 通常不需指定專案檔名，但因為本專案目錄下**同時存在 `API.sln` 與 `API.csproj`**。若不指定，.NET CLI 預設會發佈解決方案（.sln），而 .NET 規定建置解決方案時不支援 `-o` 參數，會引發 `NETSDK1194` 警告。因此特別指定 `API.csproj` 告知編譯器僅針對該專案發佈，確保輸出路徑合法且無警告。
+   > - **批次檔與執行腳本包含 (`API.csproj`)：**  
+   >   專案已於 `API.csproj` 加入 `<Content Include="批次檔\**">` 設定，確保執行 `dotnet publish` 時會自動將 `批次檔/` 複製到發佈根目錄，供 `appsettings.json` 的 `VmAuditSettings` 正常呼叫。
+   > - **嚴禁使用 `robocopy /MIR` 鏡像同步：**  
+   >   請勿對正式伺服器目錄使用 `robocopy /MIR`，因為鏡像同步會強制刪除（Purge）目標伺服器上任何在來源 publish 目錄不存在的資料夾與檔案。直接使用 `dotnet publish -o \\FEBSR20TE\api1$` 最為安全。
    > - **避免中間目錄污染：**  
    >   請直接使用 `-o` 指向遠端 UNC 共享路徑，**不要**先 publish 到本機 `./publish` 再用 robocopy 複製，避免產生巢狀 `publish/publish` 目錄結構。
    > - **處理 IIS DLL 鎖定：**  
