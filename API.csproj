@@ -23,6 +23,12 @@
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
 		</Content>
+
+		<!-- 機密注入腳本：僅妥善保存於開發端本機，發佈時排除部署至正式伺服器以確保資安 -->
+		<Content Update="批次檔\Set-EnvVariables.*">
+			<CopyToOutputDirectory>Never</CopyToOutputDirectory>
+			<CopyToPublishDirectory>Never</CopyToPublishDirectory>
+		</Content>
 	</ItemGroup>
 
 	<ItemGroup>
