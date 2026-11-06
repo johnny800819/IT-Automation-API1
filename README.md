@@ -276,6 +276,7 @@ API/
 │       └── MISContext.cs
 ├── 批次檔/                     # 自動化腳本與環境變數工具
 │   ├── Audit_VM_LocalAccounts_API.ps1 # VM 本機帳號清查 (API 呼叫版)
+│   ├── Audit_VM_LocalAccounts_Flagship - V2.ps1 # VM 本機帳號清查 (手動維運獨立旗艦版)
 │   └── Set-EnvVariables.ps1           # 正式環境變數注入腳本
 ├── Services/                   # 核心業務邏輯層
 │   ├── AppAudit/               # 應用系統帳號清查服務
