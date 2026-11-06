@@ -14,6 +14,7 @@
 > |------|------|
 > | `專案 API 架構 (文字模式).txt` | 完整的檔案架構圖、API 端點一覽、歷次重構與功能強化紀錄 |
 > | `AD帳號及權限清查報表規格驅動開發文件.md` | Active Directory 帳號及權限清查報表（Excel）之 SDD 規格驅動開發文件 |
+> | `VM伺服器本機帳戶及權限清查報表規格驅動開發文件.md` | 機房維運伺服器本機帳戶及權限清查報表（Excel）之 SDD 規格驅動開發文件 |
 > | `VMware硬體與ESXi實體規格整合報表規格驅動開發文件.md` | VMware 整合硬體與 ESXi 實體主機資源查詢之 SDD 規格驅動開發文件 |
 > | `Veeam備份視覺化報表美化與篩選規格驅動開發文件.md` | Veeam 備份視覺化監控儀表板、即時搜尋與最新一期篩選之 SDD 規格驅動開發文件 |
 > | `Scaffold Record 操作方法.txt` | EF Core Database-First 的 Scaffold 指令與注意事項 |
@@ -59,7 +60,7 @@
 
 ### 帳號清查服務 (`AccountAuditController`) — 四大稽核功能
 
-* **VM 本機帳號稽核：** 觸發 PowerShell 腳本透過 vCenter 盤點各 VM 的本機帳號，以 Upsert 邏輯同步至 `AuditVmAccountHistory`，支援軟刪除與手動維護主機（`IsManual`）豁免
+* **VM 本機帳號及權限稽核：** 觸發 PowerShell 腳本透過 vCenter 盤點各 VM 的本機帳號與本機隸屬群組（帳戶權限），以 Upsert 邏輯同步至 `AuditVmAccountHistory`，產出包含「帳戶權限」欄位與新版標題之 Excel 清查報表，支援軟刪除與手動維護主機（`IsManual`）豁免
 * **AD 帳號及權限稽核：** 透過 LDAP 取得 AD 帳號，匯出含權限清查標記（「★ 特權帳號」醒目標註與「一般帳號」）、名稱空白帳號分頁的 Excel 稽核報表
 * **DB 帳號稽核：** 執行 SQL 腳本盤點指定 SQL Server 的登入帳號，自動帶入承辦人（`Assignee`）與說明，支援人工記錄保護欄位不被覆蓋
 * **應用系統帳號稽核：** 採**組態驅動**設計，透過 `appsettings.json` 定義各應用系統的連線字串與 SQL 查詢，無需改程式碼即可新增系統。目前支援 `FEB_CMS`，報表格式為「組室、帳號、姓名、清查結果」。

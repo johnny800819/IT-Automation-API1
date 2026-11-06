@@ -175,6 +175,12 @@ namespace API.Services.VMware
                 {
                     foreach (var element in document.RootElement.EnumerateArray())
                     {
+                        string groups = "";
+                        if (element.TryGetProperty("Groups", out var groupsElem))
+                        {
+                            groups = groupsElem.GetString() ?? "";
+                        }
+
                         var history = new AuditVmAccountHistory
                         {
                             Environment = environment,
@@ -182,6 +188,7 @@ namespace API.Services.VMware
                             LocalAccountName = element.GetProperty("Name").GetString() ?? "",
                             Status = element.GetProperty("Enabled").GetBoolean() ? "[啟用]" : "[停用]",
                             Setting = "■保留帳號 □刪除帳號",
+                            AccountPermission = groups,
                             AuditDate = syncTime
                         };
                         scanResults.Add(history);
@@ -258,6 +265,20 @@ namespace API.Services.VMware
                 var allActiveRecords = _misContext.AuditVmAccountHistory
                     .Where(h => h.Environment == environment && h.IsActive)
                     .ToList();
+
+                // 將本次 PowerShell 即時掃描取得之 AccountPermission（本機隸屬群組）回填至清單，供 Excel 報表產出
+                var permissionMap = scanResults
+                    .GroupBy(s => $"{s.VirtualServerIP}_{s.LocalAccountName}".ToUpperInvariant())
+                    .ToDictionary(g => g.Key, g => g.First().AccountPermission);
+
+                foreach (var rec in allActiveRecords)
+                {
+                    var key = $"{rec.VirtualServerIP}_{rec.LocalAccountName}".ToUpperInvariant();
+                    if (permissionMap.TryGetValue(key, out var perm))
+                    {
+                        rec.AccountPermission = perm;
+                    }
+                }
 
                 _logger.LogInformation("成功完成 {Environment} 虛擬機本機帳號清查，有效帳號: {Count} 筆 (含手動維護: {ManualCount} 筆)。",
                     environment, allActiveRecords.Count, allActiveRecords.Count(x => x.IsManual));

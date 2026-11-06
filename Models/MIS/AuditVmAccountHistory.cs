@@ -69,5 +69,13 @@ namespace API.Models.MIS
         /// false = 由 PowerShell 自動掃描建立，受 Upsert 邏輯管理。
         /// </summary>
         public bool IsManual { get; set; } = false;
+
+        /// <summary>
+        /// 帳戶權限（本機使用者隸屬群組，例如 "Administrators, Users"）。
+        /// 此欄位由 PowerShell 掃描透過 ADSI 即時取得，供報表呈現使用。
+        /// 使用 [NotMapped] 確保不破壞現有資料庫資料表結構相容性。
+        /// </summary>
+        [NotMapped]
+        public string AccountPermission { get; set; } = string.Empty;
     }
 }

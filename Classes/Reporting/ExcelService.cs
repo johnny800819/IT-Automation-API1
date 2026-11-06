@@ -281,8 +281,8 @@ namespace API.Classes.Reporting
         private void PopulateVmWorksheet(ExcelWorksheet worksheet, List<AuditVmAccountHistory> data)
         {
             // --- 1. 設定大標題 (第一列) ---
-            worksheet.Cells[1, 1].Value = "機房維運伺服器本機帳戶盤點清冊";
-            worksheet.Cells[1, 1, 1, 4].Merge = true; // 合併 A1 到 D1
+            worksheet.Cells[1, 1].Value = "機房維運伺服器本機帳戶及權限清查";
+            worksheet.Cells[1, 1, 1, 5].Merge = true; // 合併 A1 到 E1
             worksheet.Cells[1, 1].Style.Font.Size = 20;
             worksheet.Cells[1, 1].Style.Font.Bold = true;
             worksheet.Cells[1, 1].Style.Font.Name = "標楷體";
@@ -293,8 +293,9 @@ namespace API.Classes.Reporting
             // --- 2. 設定欄位標頭 (第二列) ---
             worksheet.Cells[2, 1].Value = "虛擬伺服器 IP";
             worksheet.Cells[2, 2].Value = "本機使用者帳戶";
-            worksheet.Cells[2, 3].Value = "狀態";
-            worksheet.Cells[2, 4].Value = "設定";
+            worksheet.Cells[2, 3].Value = "帳戶權限";
+            worksheet.Cells[2, 4].Value = "狀態";
+            worksheet.Cells[2, 5].Value = "設定";
 
             // --- 3. 填入資料內容 (從第三列開始) ---
             int row = 3;
@@ -302,15 +303,16 @@ namespace API.Classes.Reporting
             {
                 worksheet.Cells[row, 1].Value = item.VirtualServerIP;
                 worksheet.Cells[row, 2].Value = item.LocalAccountName;
-                worksheet.Cells[row, 3].Value = item.Status;
-                worksheet.Cells[row, 4].Value = item.Setting;
+                worksheet.Cells[row, 3].Value = item.AccountPermission;
+                worksheet.Cells[row, 4].Value = item.Status;
+                worksheet.Cells[row, 5].Value = item.Setting;
                 row++;
             }
 
             if (row <= 3) return; 
 
             // --- 4. 套用所有格式 ---
-            var dataRange = worksheet.Cells[2, 1, row - 1, 4];
+            var dataRange = worksheet.Cells[2, 1, row - 1, 5];
 
             // 字體設定: 標楷體, 12大小
             dataRange.Style.Font.Name = "標楷體";
@@ -323,19 +325,22 @@ namespace API.Classes.Reporting
             dataRange.Style.Border.Right.Style = ExcelBorderStyle.Thin;
 
             // 欄頭粗體底色與置中 (第二列)
-            worksheet.Cells[2, 1, 2, 4].Style.Fill.PatternType = ExcelFillStyle.Solid;
-            worksheet.Cells[2, 1, 2, 4].Style.Fill.BackgroundColor.SetColor(Color.LightGray);
-            worksheet.Cells[2, 1, 2, 4].Style.Font.Bold = true;
-            worksheet.Cells[2, 1, 2, 4].Style.HorizontalAlignment = ExcelHorizontalAlignment.Center;
+            worksheet.Cells[2, 1, 2, 5].Style.Fill.PatternType = ExcelFillStyle.Solid;
+            worksheet.Cells[2, 1, 2, 5].Style.Fill.BackgroundColor.SetColor(Color.LightGray);
+            worksheet.Cells[2, 1, 2, 5].Style.Font.Bold = true;
+            worksheet.Cells[2, 1, 2, 5].Style.HorizontalAlignment = ExcelHorizontalAlignment.Center;
 
-            // IP (A欄) 置左、狀態 (C欄) 與 設定 (D欄) 置中
-            worksheet.Cells[2, 1, row - 1, 1].Style.HorizontalAlignment = ExcelHorizontalAlignment.Left;
-            worksheet.Cells[2, 3, row - 1, 4].Style.HorizontalAlignment = ExcelHorizontalAlignment.Center;
+            // IP (A欄)、帳號 (B欄)、帳戶權限 (C欄) 與 設定 (E欄) 內容靠左
+            worksheet.Cells[3, 1, row - 1, 3].Style.HorizontalAlignment = ExcelHorizontalAlignment.Left;
+            worksheet.Cells[3, 5, row - 1, 5].Style.HorizontalAlignment = ExcelHorizontalAlignment.Left;
+
+            // 狀態 (D欄) 置中
+            worksheet.Cells[3, 4, row - 1, 4].Style.HorizontalAlignment = ExcelHorizontalAlignment.Center;
 
             // 狀態顏色：[啟用]=深綠, [停用]=深紅
             for (int i = 3; i < row; i++)
             {
-                var statusCell = worksheet.Cells[i, 3];
+                var statusCell = worksheet.Cells[i, 4];
                 if (statusCell.Text.Contains("啟用"))
                 {
                     statusCell.Style.Font.Color.SetColor(Color.DarkGreen);
@@ -344,14 +349,11 @@ namespace API.Classes.Reporting
                 {
                     statusCell.Style.Font.Color.SetColor(Color.DarkRed);
                 }
-
-                // 設定欄 (D) 內容靠左
-                worksheet.Cells[i, 4].Style.HorizontalAlignment = ExcelHorizontalAlignment.Left;
             }
 
             // 自動調整欄寬並稍微加寬一點點
             worksheet.Cells[worksheet.Dimension.Address].AutoFitColumns();
-            for (int i = 1; i <= 4; i++)
+            for (int i = 1; i <= 5; i++)
             {
                 worksheet.Column(i).Width += 3;
             }
