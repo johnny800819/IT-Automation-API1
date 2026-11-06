@@ -244,16 +244,13 @@ namespace API.Services.VMware
                     }
                 }
 
-                // 5-4. 精準軟刪除：同時滿足以下三條件才標記為 false
-                //       a. 不在本次已處理清單中 (未被 Upsert)
-                //       b. 不是手動維護的紀錄 (IsManual = false)
-                //       c. [Bug Fix #3] 該 IP 有被本次掃描「成功存取過」，才判定為已刪除帳號
-                //          若整台主機失敗，scannedIPs 不含其 IP，其帳號全部保留不動
+                // 5-4. 自動軟刪除 (Soft Delete)：
+                //      只要是非手動維護的紀錄 (IsManual = false)，且未在本次成功處理清單中 (未被 Upsert)，
+                //      代表該帳號已在主機上刪除，或該主機已移出維運稽核清單，自動同步標記為無效 (IsActive = false)。
+                //      未來若主機重新納入或連線恢復，Upsert 會自動將其還原為 IsActive = true。
                 foreach (var rec in existingRecords)
                 {
-                    if (!processedIds.Contains(rec.Id) &&
-                        !rec.IsManual &&
-                        scannedIPs.Contains(rec.VirtualServerIP))
+                    if (!processedIds.Contains(rec.Id) && !rec.IsManual)
                     {
                         rec.IsActive = false;
                     }
