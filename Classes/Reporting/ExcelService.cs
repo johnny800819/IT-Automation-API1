@@ -39,7 +39,7 @@ namespace API.Classes.Reporting
                 var usersWithBlankDisplayName = sortedData.Where(u => string.IsNullOrWhiteSpace(u.DisplayName)).ToList();
 
                 // 2. 建立主要的工作表
-                var mainWorksheet = package.Workbook.Worksheets.Add("AD帳號清查");
+                var mainWorksheet = package.Workbook.Worksheets.Add("AD帳號及權限清查");
                 PopulateAdWorksheet(mainWorksheet, usersWithDisplayName);
 
                 // 3. 如果有 "無名稱" 的使用者，才建立第二個工作表
@@ -60,7 +60,7 @@ namespace API.Classes.Reporting
         private void PopulateAdWorksheet(ExcelWorksheet worksheet, List<AdAuditReportItem> data)
         {
             // --- 1. 設定大標題 (第一列) ---
-            worksheet.Cells[1, 1].Value = "Active Directory 帳號清查作業";
+            worksheet.Cells[1, 1].Value = "Active Directory 帳號及權限清查作業";
             worksheet.Cells[1, 1, 1, 5].Merge = true; // 合併 A1 到 E1
             worksheet.Cells[1, 1].Style.Font.Size = 20;
             worksheet.Cells[1, 1].Style.Font.Bold = true;
@@ -71,7 +71,7 @@ namespace API.Classes.Reporting
 
             // --- 2. 設定欄位標頭 (第二列) ---
             worksheet.Cells[2, 1].Value = "帳號";
-            worksheet.Cells[2, 2].Value = "特權帳號";
+            worksheet.Cells[2, 2].Value = "帳號權限（權限清查）";
             worksheet.Cells[2, 3].Value = "名稱";
             worksheet.Cells[2, 4].Value = "目前狀態";
             worksheet.Cells[2, 5].Value = "本次建議處置";
@@ -81,7 +81,7 @@ namespace API.Classes.Reporting
             foreach (var item in data)
             {
                 worksheet.Cells[row, 1].Value = item.SamAccountName;
-                worksheet.Cells[row, 2].Value = item.IsPrivileged ? "■" : "□";
+                worksheet.Cells[row, 2].Value = item.IsPrivileged ? "★ 特權帳號" : "一般帳號";
                 worksheet.Cells[row, 3].Value = item.DisplayName;
                 worksheet.Cells[row, 4].Value = item.IsEnabled ? "[啟用]" : "[停用]";
                 worksheet.Cells[row, 5].Value = "■保留 □刪除";
@@ -109,13 +109,22 @@ namespace API.Classes.Reporting
             worksheet.Cells[2, 1, 2, 5].Style.Fill.BackgroundColor.SetColor(Color.LightGray);
             worksheet.Cells[2, 1, 2, 5].Style.HorizontalAlignment = ExcelHorizontalAlignment.Center;
 
-            // 置中設定: 特權帳號 (B)、目前狀態 (D)、本次建議處置 (E)
+            // 置中設定: 帳號權限（權限清查）(B)、目前狀態 (D)、本次建議處置 (E)
             worksheet.Cells[2, 2, row - 1, 2].Style.HorizontalAlignment = ExcelHorizontalAlignment.Center;
             worksheet.Cells[2, 4, row - 1, 5].Style.HorizontalAlignment = ExcelHorizontalAlignment.Center;
 
-            // 狀態顏色: [啟用]=深綠, [停用]=深紅
+            // 樣式設定:
+            // 1. 特權帳號: 加粗並設為深紅色 (DarkRed)，增加視覺辨識度
+            // 2. 狀態顏色: [啟用]=深綠, [停用]=深紅
             for (int i = 3; i < row; i++)
             {
+                var privilegeCell = worksheet.Cells[i, 2];
+                if (privilegeCell.Text.Contains("特權帳號"))
+                {
+                    privilegeCell.Style.Font.Bold = true;
+                    privilegeCell.Style.Font.Color.SetColor(Color.DarkRed);
+                }
+
                 var statusCell = worksheet.Cells[i, 4];
                 if (statusCell.Text.Contains("啟用"))
                 {

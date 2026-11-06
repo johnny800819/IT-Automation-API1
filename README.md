@@ -13,6 +13,7 @@
 > | 文件 | 用途 |
 > |------|------|
 > | `專案 API 架構 (文字模式).txt` | 完整的檔案架構圖、API 端點一覽、歷次重構與功能強化紀錄 |
+> | `AD帳號及權限清查報表規格驅動開發文件.md` | Active Directory 帳號及權限清查報表（Excel）之 SDD 規格驅動開發文件 |
 > | `VMware硬體與ESXi實體規格整合報表規格驅動開發文件.md` | VMware 整合硬體與 ESXi 實體主機資源查詢之 SDD 規格驅動開發文件 |
 > | `Veeam備份視覺化報表美化與篩選規格驅動開發文件.md` | Veeam 備份視覺化監控儀表板、即時搜尋與最新一期篩選之 SDD 規格驅動開發文件 |
 > | `Scaffold Record 操作方法.txt` | EF Core Database-First 的 Scaffold 指令與注意事項 |
@@ -59,7 +60,7 @@
 ### 帳號清查服務 (`AccountAuditController`) — 四大稽核功能
 
 * **VM 本機帳號稽核：** 觸發 PowerShell 腳本透過 vCenter 盤點各 VM 的本機帳號，以 Upsert 邏輯同步至 `AuditVmAccountHistory`，支援軟刪除與手動維護主機（`IsManual`）豁免
-* **AD 帳號稽核：** 透過 LDAP 取得 AD 帳號，匯出含特權帳號標記、名稱空白帳號分頁的 Excel 稽核報表
+* **AD 帳號及權限稽核：** 透過 LDAP 取得 AD 帳號，匯出含權限清查標記（「★ 特權帳號」醒目標註與「一般帳號」）、名稱空白帳號分頁的 Excel 稽核報表
 * **DB 帳號稽核：** 執行 SQL 腳本盤點指定 SQL Server 的登入帳號，自動帶入承辦人（`Assignee`）與說明，支援人工記錄保護欄位不被覆蓋
 * **應用系統帳號稽核：** 採**組態驅動**設計，透過 `appsettings.json` 定義各應用系統的連線字串與 SQL 查詢，無需改程式碼即可新增系統。目前支援 `FEB_CMS`，報表格式為「組室、帳號、姓名、清查結果」。
 * **稽核決策更新（骨架）：** 提供 PATCH 端點預備接收未來稽核管理 UI 的決策寫入（`ActionDecision`），目前暫不對外公開
@@ -227,7 +228,7 @@ https://localhost:5001/swagger
 |------|------|------|
 | GET   | `/api/AccountAudit/Database/Export` | 一次掃描全部 DB 伺服器 (225、226、206)，產出含三個獨立頁籤的 Excel 報表 |
 | GET   | `/api/AccountAudit/VM/Export` | 觸發 PowerShell 掃描 VM 本機帳號並下載 Excel 報表 |
-| GET   | `/api/AccountAudit/AD/Export` | 掃描 AD 帳號並下載 Excel 報表 |
+| GET   | `/api/AccountAudit/AD/Export` | 掃描 AD 帳號並下載「AD帳號及權限清查」Excel 報表（含★特權帳號醒目標註與權限清查標頭） |
 | GET   | `/api/AccountAudit/App/{systemKey}/Export` | 掃描指定應用系統帳號並下載 Excel 報表；`systemKey` 對應 `appsettings.json` 的 `AppAuditSettings`，目前支援 `FEB_CMS` |
 | PATCH | `/api/AccountAudit/db/{id}/decision` | ⚙️ 更新 DB 帳號的稽核決策（ActionDecision）與承辦人（Assignee），待搭配管理 UI 後正式啟用 |
 
