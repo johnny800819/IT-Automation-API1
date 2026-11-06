@@ -129,12 +129,12 @@ namespace API.Controllers
                 // VM 稽核目前預設為單一環境 "Prod"
                 var rawData = await _vmAuditService.ScanAndSaveVmAccountsAsync("Prod");
 
-                // 2. 過濾非有效紀錄，並與雲端手動紀錄 (IsManual=true) 整合排序
-                //    排序邏輯：手動主機優先 → 狀態(啟用在上) → IP → 帳號名稱
+                // 2. 過濾非有效紀錄，並依業務需求排序：
+                //    排序邏輯：1. 狀態（[啟用] 在前） 2. 虛擬伺服器 IP（數值由小到大自然排序） 3. 帳號名稱升序
                 var reportData = rawData
                     .Where(x => x.IsActive)
-                    .OrderByDescending(x => x.Status ?? "")
-                    .ThenBy(x => x.VirtualServerIP ?? "")
+                    .OrderByDescending(x => (x.Status ?? "").Contains("啟用"))
+                    .ThenBy(x => ParseIpToVersion(x.VirtualServerIP ?? ""))
                     .ThenBy(x => x.LocalAccountName ?? "")
                     .ToList();
 
@@ -149,7 +149,7 @@ namespace API.Controllers
             catch (Exception ex)
             {
                 _logger.LogError(ex, "匯出虛擬機本機帳號清查報表時發生錯誤");
-                return StatusCode(500, "匯出報表時發生內部伺服器錯誤");
+                return StatusCode(500, "匯出報表時發生內部伺服器錯誤: " + ex.Message);
             }
         }
 
@@ -285,6 +285,18 @@ namespace API.Controllers
                 _logger.LogError(ex, "匯出應用系統帳號清查報表時發生錯誤，SystemKey='{SystemKey}'", systemKey);
                 return StatusCode(500, "匯出報表時發生內部伺服器錯誤: " + ex.Message);
             }
+        }
+        /// <summary>
+        /// 將 IPv4 字串解析為可自然比較的 Version 物件，使 IP 能夠依各八位元組數值由小到大排序 (例如 10.13.1.4 小於 10.13.1.10)
+        /// </summary>
+        private static Version ParseIpToVersion(string ip)
+        {
+            if (System.Net.IPAddress.TryParse(ip, out var addr) && addr.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                var b = addr.GetAddressBytes();
+                return new Version(b[0], b[1], b[2], b[3]);
+            }
+            return new Version(0, 0, 0, 0);
         }
     }
 

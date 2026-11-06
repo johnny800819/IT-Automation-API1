@@ -260,19 +260,44 @@ namespace API.Classes.Reporting
 
             using (var package = new ExcelPackage())
             {
-                // 排序邏輯：按 1. 狀態(倒序讓啟用在前) 2. IP 升序 3. 名稱 升序
-                var sortedData = data.OrderByDescending(x => x.Status ?? "")
-                                     .ThenBy(x => x.VirtualServerIP ?? "")
+                // 排序邏輯：1. 狀態（[啟用] 在前） 2. 虛擬伺服器 IP（數值由小到大自然排序） 3. 帳號名稱升序
+                var sortedData = data.OrderByDescending(x => (x.Status ?? "").Contains("啟用"))
+                                     .ThenBy(x => ParseIpToVersion(x.VirtualServerIP ?? ""))
                                      .ThenBy(x => x.LocalAccountName ?? "")
                                      .ToList();
 
-                // 建立工作表
+                // 依 IP 網段分割資料：172.x.x.x 歸入獨立分頁，其餘放主分頁
+                var mainData = sortedData.Where(x => !(x.VirtualServerIP ?? "").StartsWith("172.")).ToList();
+                var dmzData  = sortedData.Where(x =>  (x.VirtualServerIP ?? "").StartsWith("172.")).ToList();
+
+                // 建立主要工作表（非 172 網段）
                 var worksheet = package.Workbook.Worksheets.Add("本機帳戶清單");
-                PopulateVmWorksheet(worksheet, sortedData);
+                PopulateVmWorksheet(worksheet, mainData);
+
+                // 若有 172 網段資料，建立獨立分頁
+                if (dmzData.Any())
+                {
+                    _logger.LogInformation("偵測到 {Count} 筆 172 網段資料，建立「172網段帳戶清單」分頁。", dmzData.Count);
+                    var dmzSheet = package.Workbook.Worksheets.Add("172網段帳戶清單");
+                    PopulateVmWorksheet(dmzSheet, dmzData);
+                }
 
                 _logger.LogInformation("Excel 報表內容生成完畢。");
                 return package.GetAsByteArray();
             }
+        }
+
+        /// <summary>
+        /// 將 IPv4 字串解析為可自然比較的 Version 物件，使 IP 能夠依各八位元組數值由小到大排序 (例如 10.13.1.4 小於 10.13.1.10)
+        /// </summary>
+        private static Version ParseIpToVersion(string ip)
+        {
+            if (System.Net.IPAddress.TryParse(ip, out var addr) && addr.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                var b = addr.GetAddressBytes();
+                return new Version(b[0], b[1], b[2], b[3]);
+            }
+            return new Version(0, 0, 0, 0);
         }
 
         /// <summary>
@@ -301,9 +326,11 @@ namespace API.Classes.Reporting
             int row = 3;
             foreach (var item in data)
             {
+                var permission = string.IsNullOrWhiteSpace(item.AccountPermission) ? "無權限" : item.AccountPermission;
+
                 worksheet.Cells[row, 1].Value = item.VirtualServerIP;
                 worksheet.Cells[row, 2].Value = item.LocalAccountName;
-                worksheet.Cells[row, 3].Value = item.AccountPermission;
+                worksheet.Cells[row, 3].Value = permission;
                 worksheet.Cells[row, 4].Value = item.Status;
                 worksheet.Cells[row, 5].Value = item.Setting;
                 row++;

@@ -107,7 +107,8 @@ namespace API.Services.VMware
 
                     if (process.ExitCode != 0)
                     {
-                        _logger.LogWarning("PowerShell 結束代碼不為 0 ({ExitCode})。錯誤輸出: {ErrorOutput}", process.ExitCode, errorOutput);
+                        _logger.LogError("PowerShell 結束代碼不為 0 ({ExitCode})。錯誤輸出: {ErrorOutput}", process.ExitCode, errorOutput);
+                        throw new InvalidOperationException($"PowerShell 腳本執行失敗 (代碼 {process.ExitCode})。錯誤訊息: {errorOutput}");
                     }
                     else if (!string.IsNullOrWhiteSpace(errorOutput))
                     {
@@ -161,8 +162,8 @@ namespace API.Services.VMware
 
             if (string.IsNullOrWhiteSpace(jsonOutput))
             {
-                _logger.LogWarning("PowerShell 腳本未回傳有效的 JSON 資料。");
-                return Enumerable.Empty<AuditVmAccountHistory>();
+                _logger.LogError("PowerShell 腳本未回傳有效的 JSON 資料。錯誤輸出: {ErrorOutput}", errorOutput);
+                throw new InvalidOperationException($"PowerShell 腳本未回傳有效的 JSON 資料。錯誤輸出: {errorOutput}");
             }
 
             var scanResults = new List<AuditVmAccountHistory>();
