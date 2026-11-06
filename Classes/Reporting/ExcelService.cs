@@ -328,6 +328,13 @@ namespace API.Classes.Reporting
             {
                 var permission = string.IsNullOrWhiteSpace(item.AccountPermission) ? "無權限" : item.AccountPermission;
 
+                // 業務規則：172 網段之 "feb16" 帳號直接顯示為「管理者權限」
+                if ((item.VirtualServerIP ?? "").StartsWith("172.") &&
+                    string.Equals(item.LocalAccountName, "feb16", StringComparison.OrdinalIgnoreCase))
+                {
+                    permission = "管理者權限";
+                }
+
                 worksheet.Cells[row, 1].Value = item.VirtualServerIP;
                 worksheet.Cells[row, 2].Value = item.LocalAccountName;
                 worksheet.Cells[row, 3].Value = permission;
