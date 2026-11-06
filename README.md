@@ -60,7 +60,7 @@
 
 ### 帳號清查服務 (`AccountAuditController`) — 四大稽核功能
 
-* **VM 本機帳號及權限稽核：** 觸發 PowerShell 腳本透過 vCenter 盤點各 VM 的本機帳號與本機隸屬群組（帳戶權限），以 Upsert 邏輯同步至 `AuditVmAccountHistory`，產出包含「帳戶權限」欄位與新版標題之 Excel 清查報表，支援軟刪除與手動維護主機（`IsManual`）豁免
+* **VM 本機帳號及權限稽核：** 觸發 PowerShell 腳本透過 vCenter 盤點各 VM 的本機帳號與本機隸屬群組（帳戶權限），以 Upsert 邏輯同步至 `AuditVmAccountHistory`，具備自動軟刪除同步（伺服器移出範圍或帳號刪除即自動停用），產出包含「帳戶權限」欄位、IP 自然數值排序、172 網段獨立分頁與新版標題之 Excel 清查報表，支援手動維護主機（`IsManual`）保護機制
 * **AD 帳號及權限稽核：** 透過 LDAP 取得 AD 帳號，匯出含權限清查標記（「★ 特權帳號」醒目標註與「一般帳號」）、名稱空白帳號分頁的 Excel 稽核報表
 * **DB 帳號稽核：** 執行 SQL 腳本盤點指定 SQL Server 的登入帳號，自動帶入承辦人（`Assignee`）與說明，支援人工記錄保護欄位不被覆蓋
 * **應用系統帳號稽核：** 採**組態驅動**設計，透過 `appsettings.json` 定義各應用系統的連線字串與 SQL 查詢，無需改程式碼即可新增系統。目前支援 `FEB_CMS`，報表格式為「組室、帳號、姓名、清查結果」。
